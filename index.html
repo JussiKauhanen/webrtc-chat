@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f4f1e8">
+  <title>NearChat Direct</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app" aria-label="NearChat Direct">
+    <header class="topbar">
+      <a class="brand" href="../" aria-label="Back to NearChat">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>NearChat <small>Direct</small></span>
+      </a>
+      <button class="share-button" id="shareButton" type="button">Share</button>
+    </header>
+
+    <section class="connection-bar" aria-label="Connection status">
+      <div class="connection-state">
+        <span class="status-dot" id="statusDot" data-state="offline" aria-hidden="true"></span>
+        <span><strong id="statusText">Not connected</strong><small id="statusDetail">Pair two nearby devices to begin.</small></span>
+      </div>
+      <button class="text-button" id="disconnectButton" type="button" hidden>Disconnect</button>
+    </section>
+
+    <section class="metrics" aria-label="Live connection metrics">
+      <div><span>RTT</span><strong id="metricRtt">—</strong></div>
+      <div><span>Sent</span><strong id="metricSent">0 B</strong></div>
+      <div><span>Received</span><strong id="metricReceived">0 B</strong></div>
+      <div><span>Live rate</span><strong id="metricRate">0 B/s</strong></div>
+      <div><span>Uptime</span><strong id="metricUptime">00:00</strong></div>
+      <div><span>Path</span><strong id="metricPath">—</strong></div>
+    </section>
+
+    <section class="message-stream" id="messageStream" aria-live="polite" aria-label="Chat messages">
+      <div class="empty-state" id="emptyState">
+        <span aria-hidden="true">↗</span>
+        <h1>One direct chat.</h1>
+        <p>Put both devices on the same Wi-Fi or personal hotspot, press Share, then send text and images in real time.</p>
+      </div>
+    </section>
+
+    <form class="composer" id="composer">
+      <div class="image-draft" id="imageDraft" hidden>
+        <img id="imageDraftPreview" alt="Selected image preview">
+        <span><strong id="imageDraftName">Image ready</strong><small id="imageDraftSize"></small></span>
+        <button id="removeImage" type="button" aria-label="Remove selected image">×</button>
+      </div>
+      <div class="composer-row">
+        <button class="image-button" id="imageButton" type="button" aria-label="Choose an image">＋</button>
+        <input id="imageInput" type="file" accept="image/*" hidden>
+        <input class="message-input" id="messageInput" type="text" maxlength="2000"
+               autocomplete="off" enterkeyhint="send" placeholder="Connect to start chatting"
+               aria-label="Message" disabled>
+        <button class="send-button" id="sendButton" type="submit" aria-label="Send" disabled>↑</button>
+      </div>
+    </form>
+  </main>
+
+  <div class="overlay" id="pairingOverlay" hidden>
+    <section class="pairing-sheet" role="dialog" aria-modal="true" aria-labelledby="pairingTitle">
+      <header class="sheet-head">
+        <div><span class="sheet-kicker">Direct pairing</span><h2 id="pairingTitle">Connect two devices</h2></div>
+        <button class="close-button" id="closePairing" type="button" aria-label="Close pairing">×</button>
+      </header>
+
+      <div class="pair-view" id="pairLoading">
+        <div class="loading-mark" aria-hidden="true"></div>
+        <strong id="pairLoadingTitle">Creating a private invite…</strong>
+        <p id="pairLoadingCopy">Gathering a direct route for this device.</p>
+      </div>
+
+      <div class="pair-view qr-view" id="pairQr" hidden>
+        <canvas id="pairQrCanvas" aria-label="Animated QR pairing code"></canvas>
+        <div class="qr-copy">
+          <strong id="qrTitle">Scan this invite</strong>
+          <p id="qrStatus">Pairing frame 1 of 1</p>
+        </div>
+        <div class="pair-actions">
+          <button class="primary" id="scanAnswerButton" type="button">Scan their answer</button>
+          <button class="secondary" id="scanInsteadButton" type="button">Scan an invite instead</button>
+        </div>
+        <details class="manual-pairing">
+          <summary>Pair without the camera</summary>
+          <textarea id="manualCode" rows="3" readonly aria-label="This device pairing code"></textarea>
+          <button class="secondary compact" id="copyCodeButton" type="button">Copy this code</button>
+          <label for="remoteCode">Paste the other device’s code</label>
+          <textarea id="remoteCode" rows="3" aria-label="Other device pairing code"></textarea>
+          <button class="secondary compact" id="useCodeButton" type="button">Use pasted code</button>
+        </details>
+      </div>
+
+      <div class="pair-view scanner-view" id="pairScanner" hidden>
+        <div class="scanner">
+          <video id="scannerVideo" playsinline muted autoplay></video>
+          <canvas id="scannerCanvas" hidden></canvas>
+          <div class="scan-frame" aria-hidden="true"></div>
+        </div>
+        <strong id="scannerTitle">Scan the other device</strong>
+        <p id="scannerStatus">Starting camera…</p>
+        <button class="secondary" id="cancelScanner" type="button">Cancel scan</button>
+      </div>
+
+      <div class="pair-view connected-view" id="pairConnected" hidden>
+        <span class="connected-mark" aria-hidden="true">✓</span>
+        <strong>Direct channel connected</strong>
+        <p>The QR handshake is complete. Messages now travel through WebRTC.</p>
+        <button class="secondary connected-disconnect" id="disconnectInSheet" type="button">Disconnect</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
