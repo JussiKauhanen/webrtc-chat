@@ -271,6 +271,7 @@ button:disabled { cursor: default; opacity: .45; }
   backdrop-filter: blur(8px);
 }
 .pairing-sheet {
+  position: relative;
   width: min(100%, 520px);
   max-height: min(760px, calc(100dvh - 36px));
   overflow: auto;
@@ -281,7 +282,7 @@ button:disabled { cursor: default; opacity: .45; }
 }
 .sheet-head {
   min-height: 78px;
-  padding: 16px 17px 14px 22px;
+  padding: max(16px, env(safe-area-inset-top)) 17px 14px 22px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -294,29 +295,117 @@ button:disabled { cursor: default; opacity: .45; }
 .pair-view { padding: 24px; text-align: center; }
 .pair-view > strong { display: block; color: var(--ink); font-size: 17px; }
 .pair-view > p { margin: 7px auto 0; color: var(--mid); font-size: 13px; line-height: 1.5; }
-.loading-mark {
-  width: 46px;
-  height: 46px;
-  margin: 26px auto 18px;
-  border: 3px solid var(--soft);
-  border-top-color: var(--green);
-  border-radius: 50%;
-  animation: spin .8s linear infinite;
+.pair-dance { padding-top: 14px; }
+.optical-zone {
+  position: relative;
+  width: 100%;
+  display: grid;
+  justify-items: center;
 }
 #pairQrCanvas {
   display: block;
-  width: min(100%, 330px);
+  width: min(62vw, 250px);
   height: auto;
   margin: 0 auto;
-  border: 12px solid var(--white);
-  border-radius: 18px;
+  border: 14px solid var(--white);
+  border-radius: 22px;
   box-shadow: 0 10px 30px rgba(21, 63, 51, .1);
   image-rendering: pixelated;
 }
-.qr-copy { margin-top: 17px; }
-.qr-copy strong { display: block; color: var(--ink); font-size: 16px; }
-.qr-copy p { margin: 5px 0 0; color: var(--mid); font: 10px/1.4 var(--mono); }
-.pair-actions { display: grid; gap: 8px; margin-top: 18px; }
+.camera-state {
+  margin-top: 10px;
+  color: var(--green);
+  font: 750 9px/1.3 var(--mono);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.camera-state::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 4px var(--green-soft);
+}
+.camera-state[data-state="error"] { color: var(--red); }
+.camera-state[data-state="error"]::before { box-shadow: 0 0 0 4px #fbe5e2; }
+.dance-copy { margin-top: 18px; }
+.phase-pill {
+  display: inline-flex;
+  min-height: 28px;
+  padding: 0 11px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--green);
+  background: var(--white);
+  font: 750 9px/1 var(--mono);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.dance-copy strong {
+  display: block;
+  margin-top: 12px;
+  color: var(--ink);
+  font-size: 18px;
+  letter-spacing: -.02em;
+}
+.dance-copy p {
+  max-width: 390px;
+  margin: 7px auto 0;
+  color: var(--mid);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.dance-progress {
+  width: min(100%, 360px);
+  height: 5px;
+  margin: 18px auto 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--soft);
+}
+.dance-progress span {
+  display: block;
+  width: 8%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+  transition: width .25s ease;
+}
+.alignment-guide {
+  width: min(100%, 300px);
+  margin: 17px auto 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  color: var(--mid);
+}
+.alignment-guide span {
+  height: 20px;
+  border-top: 2px solid var(--line);
+  border-inline: 2px solid var(--line);
+  border-radius: 8px 8px 0 0;
+}
+.alignment-guide small {
+  grid-column: 1 / -1;
+  margin-top: -14px;
+  font: 700 8px/1 var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.camera-feed {
+  position: fixed;
+  left: -2px;
+  top: -2px;
+  width: 1px;
+  height: 1px;
+  opacity: .001;
+  pointer-events: none;
+}
+.cancel-pairing { margin-top: 16px; }
 .primary, .secondary {
   width: 100%;
   min-height: 46px;
@@ -327,34 +416,6 @@ button:disabled { cursor: default; opacity: .45; }
 .primary { background: var(--ink); color: var(--white); }
 .secondary { border: 1px solid var(--line); background: var(--white); color: var(--ink); }
 .compact { min-height: 40px; margin-top: 7px; font-size: 12px; }
-.manual-pairing { margin-top: 17px; padding-top: 14px; border-top: 1px solid var(--line); text-align: left; }
-.manual-pairing summary { color: var(--mid); font-size: 12px; font-weight: 700; cursor: pointer; }
-.manual-pairing label { display: block; margin: 14px 0 6px; color: var(--mid); font-size: 11px; }
-.manual-pairing textarea {
-  width: 100%;
-  margin-top: 9px;
-  padding: 10px;
-  resize: vertical;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--white);
-  font: 9px/1.4 var(--mono);
-}
-.scanner { position: relative; height: min(52vh, 390px); margin-bottom: 17px; overflow: hidden; border-radius: 18px; background: #101713; }
-.scanner video { width: 100%; height: 100%; display: block; object-fit: cover; }
-.scan-frame {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: min(72vw, 270px);
-  aspect-ratio: 1;
-  border: 2px solid rgba(255, 255, 255, .92);
-  border-radius: 20px;
-  box-shadow: 0 0 0 999px rgba(0, 0, 0, .22);
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-}
-.scanner-view .secondary { margin-top: 18px; }
 .connected-mark {
   width: 60px;
   height: 60px;
@@ -386,16 +447,33 @@ button:disabled { cursor: default; opacity: .45; }
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
-@keyframes spin { to { transform: rotate(360deg); } }
-
 @media (max-width: 640px) {
   .app { border: 0; }
   .metrics { grid-template-columns: repeat(3, 1fr); }
   .metrics div:nth-child(3) { border-right: 0; }
   .metrics div:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
   .message-bubble { max-width: 88%; }
-  .overlay { padding: 0; align-items: end; }
-  .pairing-sheet { width: 100%; max-height: 94dvh; border-radius: 25px 25px 0 0; }
+  .overlay { padding: 0; }
+  .pairing-sheet {
+    width: 100%;
+    height: 100dvh;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+  }
+  .sheet-head {
+    position: absolute;
+    inset: 0 0 auto;
+    z-index: 2;
+    min-height: 0;
+    padding: max(10px, env(safe-area-inset-top)) 12px 0;
+    border: 0;
+    pointer-events: none;
+  }
+  .sheet-head > div { display: none; }
+  .sheet-head .close-button { margin-left: auto; pointer-events: auto; }
+  .pair-dance { padding: max(12px, calc(env(safe-area-inset-top) + 8px)) 20px max(18px, env(safe-area-inset-bottom)); }
+  #pairQrCanvas { width: min(61vw, 235px); }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,13 +1,19 @@
 import { QRCode, jsQR } from './assets/qr-libs.js';
+import initRaptor, { RaptorQDecoder, encode_packets } from './assets/raptorq.js';
 
 const $ = selector => document.querySelector(selector);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const SIGNAL_PREFIX = 'NCD1';
-const FRAME_PREFIX = 'NCP1';
-const SIGNAL_CHUNK_CHARS = 620;
-const SIGNAL_FRAME_MS = 520;
+const HELLO_PREFIX = 'NCH1';
+const SIGNAL_FRAME_PREFIX = 'NCS1';
+const SIGNAL_FRAME_MS = 135;
+const RAPTOR_TRANSPORT_BYTES = 260;
+const RAPTOR_REPAIR_PERCENT = 300;
+const RAPTOR_FRAME_MAGIC = new Uint8Array([0x4e, 0x43, 0x53, 0x31]); // NCS1
+const RAPTOR_HEADER_BYTES = 16;
+const RAPTOR_CRC_BYTES = 4;
+const MAX_SIGNAL_BYTES = 64 * 1024;
 const HEARTBEAT_MS = 4000;
 const HEARTBEAT_STALE_MS = 12000;
 const MEDIA_CHUNK_BYTES = 16 * 1024;
@@ -42,26 +48,17 @@ const ui = {
   removeImage: $('#removeImage'),
   overlay: $('#pairingOverlay'),
   closePairing: $('#closePairing'),
-  pairLoading: $('#pairLoading'),
-  pairLoadingTitle: $('#pairLoadingTitle'),
-  pairLoadingCopy: $('#pairLoadingCopy'),
-  pairQr: $('#pairQr'),
-  pairScanner: $('#pairScanner'),
+  pairDance: $('#pairDance'),
   pairConnected: $('#pairConnected'),
   qrCanvas: $('#pairQrCanvas'),
-  qrTitle: $('#qrTitle'),
-  qrStatus: $('#qrStatus'),
-  scanAnswer: $('#scanAnswerButton'),
-  scanInstead: $('#scanInsteadButton'),
-  manualCode: $('#manualCode'),
-  remoteCode: $('#remoteCode'),
-  copyCode: $('#copyCodeButton'),
-  useCode: $('#useCodeButton'),
+  pairPhase: $('#pairPhase'),
+  pairStatusTitle: $('#pairStatusTitle'),
+  pairStatus: $('#pairStatus'),
+  pairProgress: $('#pairProgress'),
+  cameraState: $('#cameraState'),
+  cancelPairing: $('#cancelPairing'),
   scannerVideo: $('#scannerVideo'),
   scannerCanvas: $('#scannerCanvas'),
-  scannerTitle: $('#scannerTitle'),
-  scannerStatus: $('#scannerStatus'),
-  cancelScanner: $('#cancelScanner'),
   disconnectInSheet: $('#disconnectInSheet'),
   toast: $('#toast')
 };
@@ -84,11 +81,23 @@ let sentBytes = 0;
 let receivedBytes = 0;
 let byteSamples = [];
 
-let signalCode = '';
 let signalKind = '';
 let signalFrames = [];
 let signalFrameIndex = 0;
 let signalTimer = 0;
+let pairingActive = false;
+let localHello = '';
+let remoteHello = '';
+let pairingSession = '';
+let pairingSessionNumber = 0;
+let buildingSignal = false;
+let raptorReady = null;
+let signalDecoder = null;
+let signalDecodeKind = '';
+let signalSeenPackets = new Set();
+let signalAcceptedPackets = 0;
+let signalSourceSymbols = 0;
+let signalFinishing = false;
 
 let cameraStream = null;
 let scannerRaf = 0;
@@ -96,9 +105,6 @@ let scannerGeneration = 0;
 let scannerBusy = false;
 let scannerLastDecode = 0;
 let barcodeDetector = null;
-let scanExpectedType = 'offer';
-let scannedBundle = null;
-let consumingSignal = false;
 
 let pendingImage = null;
 let pendingImageUrl = '';
@@ -121,9 +127,7 @@ function showToast(message) {
 }
 
 function setPairView(view) {
-  ui.pairLoading.hidden = view !== 'loading';
-  ui.pairQr.hidden = view !== 'qr';
-  ui.pairScanner.hidden = view !== 'scanner';
+  ui.pairDance.hidden = view !== 'dance';
   ui.pairConnected.hidden = view !== 'connected';
 }
 
@@ -137,6 +141,17 @@ function closePairing() {
   stopSignalAnimation();
   ui.overlay.hidden = true;
   document.body.style.overflow = '';
+}
+
+function setPairingProgress(percent) {
+  ui.pairProgress.style.width = `${Math.max(8, Math.min(100, percent))}%`;
+}
+
+function setPairingCopy(phase, title, detail, progress) {
+  ui.pairPhase.textContent = phase;
+  ui.pairStatusTitle.textContent = title;
+  ui.pairStatus.textContent = detail;
+  setPairingProgress(progress);
 }
 
 function setConnectionStatus(state, title, detail) {
@@ -296,15 +311,19 @@ function stopHeartbeat() {
 function setConnectedUi() {
   if (!connectedAt) connectedAt = Date.now();
   lastPongAt = Date.now();
+  pairingActive = false;
+  buildingSignal = false;
+  stopScanner();
+  stopSignalAnimation();
+  resetSignalDecoder();
   setConnectionStatus('connected', 'Live connection', 'Heartbeat active · messages send directly.');
   ui.share.textContent = 'Connection';
   ui.disconnect.hidden = false;
+  navigator.vibrate?.([70, 50, 130]);
   startHeartbeat();
   startMetricTimers();
   updateComposer();
   if (!ui.overlay.hidden) {
-    stopScanner();
-    stopSignalAnimation();
     setPairView('connected');
     setTimeout(() => {
       if (isConnected()) closePairing();
@@ -396,7 +415,7 @@ function setupPeer(role) {
     bindChatChannel(peer.createDataChannel('near-chat', { ordered: true }));
     bindMediaChannel(peer.createDataChannel('near-media', { ordered: true }));
   }
-  setConnectionStatus('pairing', 'Pairing devices', 'Exchange the QR offer and answer.');
+  setConnectionStatus('pairing', 'Pairing devices', 'Keep both screens face to face.');
   updateComposer();
   return peer;
 }
@@ -422,7 +441,13 @@ function disconnectPeer() {
   teardownPeer();
   stopSignalAnimation();
   stopScanner();
-  signalCode = '';
+  resetSignalDecoder();
+  pairingActive = false;
+  buildingSignal = false;
+  localHello = '';
+  remoteHello = '';
+  pairingSession = '';
+  pairingSessionNumber = 0;
   signalFrames = [];
   setConnectionStatus('offline', 'Not connected', 'Pair two nearby devices to begin.');
   showToast('Direct connection closed');
@@ -449,42 +474,6 @@ async function transformBytes(bytes, Transform) {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-async function encodeDescription(description) {
-  const raw = encoder.encode(JSON.stringify({
-    version: 1,
-    description: { type: description.type, sdp: description.sdp }
-  }));
-  let body = raw;
-  let mode = 'r';
-  if ('CompressionStream' in window) {
-    try {
-      const compressed = await transformBytes(raw, CompressionStream);
-      if (compressed.length < raw.length) {
-        body = compressed;
-        mode = 'g';
-      }
-    } catch {}
-  }
-  return `${SIGNAL_PREFIX}.${mode}.${bytesToBase64Url(body)}`;
-}
-
-async function decodeDescription(code) {
-  const match = /^NCD1\.([gr])\.([A-Za-z0-9_-]+)$/.exec(code.trim());
-  if (!match) throw new Error('That is not a NearChat Direct pairing code.');
-  let bytes = base64UrlToBytes(match[2]);
-  if (match[1] === 'g') {
-    if (!('DecompressionStream' in window))
-      throw new Error('This browser cannot open the compressed pairing code.');
-    bytes = await transformBytes(bytes, DecompressionStream);
-  }
-  const payload = JSON.parse(decoder.decode(bytes));
-  const description = payload?.description;
-  if (payload?.version !== 1 || !description || !['offer', 'answer'].includes(description.type) ||
-      typeof description.sdp !== 'string' || description.sdp.length > 100000)
-    throw new Error('The pairing code is invalid.');
-  return description;
-}
-
 function fnvHash(value) {
   let hash = 0x811c9dc5;
   for (let index = 0; index < value.length; index++) {
@@ -494,14 +483,144 @@ function fnvHash(value) {
   return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
-function splitSignalFrames(code) {
-  const id = crypto.getRandomValues(new Uint32Array(1))[0].toString(16).padStart(8, '0');
-  const hash = fnvHash(code);
-  const pieces = [];
-  for (let offset = 0; offset < code.length; offset += SIGNAL_CHUNK_CHARS)
-    pieces.push(code.slice(offset, offset + SIGNAL_CHUNK_CHARS));
-  return pieces.map((piece, index) =>
-    `${FRAME_PREFIX}|${id}|${index}|${pieces.length}|${hash}|${piece}`);
+function randomHex(byteCount = 8) {
+  return Array.from(crypto.getRandomValues(new Uint8Array(byteCount)), byte =>
+    byte.toString(16).padStart(2, '0')).join('');
+}
+
+function ensureRaptor() {
+  if (!raptorReady) {
+    raptorReady = initRaptor().catch(error => {
+      raptorReady = null;
+      throw error;
+    });
+  }
+  return raptorReady;
+}
+
+const crcTable = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < table.length; index++) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit++)
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let value = 0xffffffff;
+  for (const byte of bytes) value = crcTable[(value ^ byte) & 0xff] ^ (value >>> 8);
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+function hasMagic(bytes, magic) {
+  return magic.every((byte, index) => bytes[index] === byte);
+}
+
+function buildRaptorFrame({ session, encodedLength, packet }) {
+  const total = RAPTOR_HEADER_BYTES + packet.length + RAPTOR_CRC_BYTES;
+  const output = new Uint8Array(total);
+  const view = new DataView(output.buffer);
+  output.set(RAPTOR_FRAME_MAGIC, 0);
+  view.setUint32(4, session >>> 0, false);
+  view.setUint32(8, encodedLength >>> 0, false);
+  view.setUint16(12, RAPTOR_TRANSPORT_BYTES, false);
+  view.setUint16(14, packet.length, false);
+  output.set(packet, RAPTOR_HEADER_BYTES);
+  view.setUint32(total - RAPTOR_CRC_BYTES,
+    crc32(output.subarray(0, total - RAPTOR_CRC_BYTES)), false);
+  return output;
+}
+
+function parseRaptorFrame(bytes) {
+  if (bytes.length < RAPTOR_HEADER_BYTES + RAPTOR_CRC_BYTES ||
+      !hasMagic(bytes, RAPTOR_FRAME_MAGIC)) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const session = view.getUint32(4, false);
+  const encodedLength = view.getUint32(8, false);
+  const transportSize = view.getUint16(12, false);
+  const packetLength = view.getUint16(14, false);
+  const expectedLength = RAPTOR_HEADER_BYTES + packetLength + RAPTOR_CRC_BYTES;
+  if (expectedLength !== bytes.length || encodedLength < 2 || encodedLength > MAX_SIGNAL_BYTES ||
+      transportSize !== RAPTOR_TRANSPORT_BYTES || packetLength > transportSize) return null;
+  const expectedCrc = view.getUint32(bytes.length - RAPTOR_CRC_BYTES, false);
+  if (crc32(bytes.subarray(0, bytes.length - RAPTOR_CRC_BYTES)) !== expectedCrc) return null;
+  return {
+    session,
+    encodedLength,
+    transportSize,
+    packet: bytes.slice(RAPTOR_HEADER_BYTES, RAPTOR_HEADER_BYTES + packetLength)
+  };
+}
+
+function packetKey(packet) {
+  if (packet.length < 4) return '';
+  return Array.from(packet.subarray(0, 4), byte =>
+    byte.toString(16).padStart(2, '0')).join('');
+}
+
+function sourceSymbolEstimate(encodedLength, transportSize) {
+  return Math.max(1, Math.ceil(encodedLength / Math.max(1, transportSize - 4)));
+}
+
+async function encodeSignalPayload(kind, description) {
+  const raw = encoder.encode(JSON.stringify({
+    version: 2,
+    session: pairingSession,
+    kind,
+    description: { type: description.type, sdp: description.sdp }
+  }));
+  let body = raw;
+  let compressed = false;
+  if ('CompressionStream' in window) {
+    try {
+      const zipped = await transformBytes(raw, CompressionStream);
+      if (zipped.length < raw.length) {
+        body = zipped;
+        compressed = true;
+      }
+    } catch {}
+  }
+  const payload = new Uint8Array(body.length + 1);
+  payload[0] = compressed ? 1 : 0;
+  payload.set(body, 1);
+  return payload;
+}
+
+async function decodeSignalPayload(bytes, expectedKind) {
+  if (bytes.length < 2 || bytes.length > MAX_SIGNAL_BYTES) throw new Error('The optical handshake was invalid.');
+  let body = bytes.subarray(1);
+  if (bytes[0] === 1) {
+    if (!('DecompressionStream' in window)) throw new Error('This browser cannot decompress the pairing signal.');
+    body = await transformBytes(body, DecompressionStream);
+  } else if (bytes[0] !== 0) {
+    throw new Error('The optical handshake was invalid.');
+  }
+  const payload = JSON.parse(decoder.decode(body));
+  const description = payload?.description;
+  if (payload?.version !== 2 || payload.session !== pairingSession || payload.kind !== expectedKind ||
+      !description || typeof description.sdp !== 'string' || description.sdp.length > 100000 ||
+      (expectedKind === 'O' && description.type !== 'offer') ||
+      (expectedKind === 'A' && description.type !== 'answer'))
+    throw new Error('The optical handshake did not match this pairing.');
+  return description;
+}
+
+async function buildSignalFrames(kind, description) {
+  const payload = await encodeSignalPayload(kind, description);
+  if (payload.length > MAX_SIGNAL_BYTES) throw new Error('The WebRTC handshake is too large to display.');
+  await ensureRaptor();
+  const packets = Array.from(
+    encode_packets(payload, RAPTOR_TRANSPORT_BYTES, RAPTOR_REPAIR_PERCENT),
+    packet => new Uint8Array(packet)
+  );
+  return packets.map(packet => `${SIGNAL_FRAME_PREFIX}|${kind}|${bytesToBase64Url(buildRaptorFrame({
+    session: pairingSessionNumber,
+    encodedLength: payload.length,
+    packet
+  }))}`);
 }
 
 function renderQr(text) {
@@ -534,7 +653,6 @@ function stopSignalAnimation() {
 function paintSignalFrame() {
   if (!signalFrames.length) return;
   renderQr(signalFrames[signalFrameIndex]);
-  ui.qrStatus.textContent = `Pairing frame ${signalFrameIndex + 1} of ${signalFrames.length} · keep both screens steady`;
   signalFrameIndex = (signalFrameIndex + 1) % signalFrames.length;
 }
 
@@ -545,16 +663,24 @@ function startSignalAnimation() {
   if (signalFrames.length > 1) signalTimer = setInterval(paintSignalFrame, SIGNAL_FRAME_MS);
 }
 
-function showSignalCode(code, kind) {
-  signalCode = code;
+function helloFrame() {
+  return `${HELLO_PREFIX}|${localHello}`;
+}
+
+function displayHello() {
+  signalKind = 'hello';
+  signalFrames = [helloFrame()];
+  startSignalAnimation();
+}
+
+function displaySignalFrames(frames, kind) {
+  const interleaved = [];
+  frames.forEach((frame, index) => {
+    if (index % 3 === 0) interleaved.push(helloFrame());
+    interleaved.push(frame);
+  });
   signalKind = kind;
-  signalFrames = splitSignalFrames(code);
-  ui.manualCode.value = code;
-  ui.remoteCode.value = '';
-  ui.qrTitle.textContent = kind === 'offer' ? 'Scan this invite' : 'Let the first phone scan this answer';
-  ui.scanAnswer.hidden = kind !== 'offer';
-  ui.scanInstead.textContent = kind === 'offer' ? 'Scan an invite instead' : 'Scan a different invite';
-  setPairView('qr');
+  signalFrames = interleaved;
   startSignalAnimation();
 }
 
@@ -574,102 +700,160 @@ function waitForIceGathering(connection, timeout = 5000) {
   });
 }
 
-async function createInvite() {
-  stopScanner();
-  stopSignalAnimation();
-  teardownPeer({ keepMetrics: false });
-  signalCode = '';
-  openPairing();
-  setPairView('loading');
-  ui.pairLoadingTitle.textContent = 'Creating a private invite…';
-  ui.pairLoadingCopy.textContent = 'Gathering a direct route for this device.';
+function resetSignalDecoder() {
+  try { signalDecoder?.free(); } catch {}
+  signalDecoder = null;
+  signalDecodeKind = '';
+  signalSeenPackets = new Set();
+  signalAcceptedPackets = 0;
+  signalSourceSymbols = 0;
+  signalFinishing = false;
+}
+
+function parseSignalFrame(raw) {
+  const match = typeof raw === 'string' && raw.length < 1200
+    ? /^NCS1\|([OA])\|([A-Za-z0-9_-]+)$/.exec(raw)
+    : null;
+  if (!match) return null;
+  let bytes;
+  try { bytes = base64UrlToBytes(match[2]); } catch { return null; }
+  const frame = parseRaptorFrame(bytes);
+  return frame ? { kind: match[1], frame } : null;
+}
+
+async function createOpticalOffer() {
+  if (!pairingActive || buildingSignal) return;
+  buildingSignal = true;
+  setPairingCopy('2 · Preparing the offer', 'Roles chosen automatically',
+    'This phone is preparing the direct route. Keep the screens aligned.', 30);
   try {
     const connection = setupPeer('initiator');
     const offer = await connection.createOffer();
     await connection.setLocalDescription(offer);
     await waitForIceGathering(connection);
-    const code = await encodeDescription(connection.localDescription);
-    showSignalCode(code, 'offer');
+    if (!pairingActive || peer !== connection) return;
+    const frames = await buildSignalFrames('O', connection.localDescription);
+    displaySignalFrames(frames, 'offer');
+    setPairingCopy('2 · Sending the offer', 'Keep the screens still',
+      'The other phone is collecting the light frames and will answer automatically.', 42);
   } catch (error) {
-    teardownPeer();
-    setConnectionStatus('failed', 'Pairing unavailable', 'This browser could not create a WebRTC invite.');
-    ui.pairLoadingTitle.textContent = 'Could not create an invite';
-    ui.pairLoadingCopy.textContent = error.message || 'WebRTC is not available in this browser.';
+    failPairing(error);
+  } finally {
+    buildingSignal = false;
   }
 }
 
-async function acceptSignalCode(code, expectedType) {
-  const description = await decodeDescription(code);
-  if (expectedType && description.type !== expectedType)
-    throw new Error(`This phone is waiting for a WebRTC ${expectedType}.`);
-
-  stopScanner();
-  setPairView('loading');
-  if (description.type === 'offer') {
-    teardownPeer({ keepMetrics: false });
-    ui.pairLoadingTitle.textContent = 'Creating the answer…';
-    ui.pairLoadingCopy.textContent = 'The first phone will scan one more QR code.';
-    const connection = setupPeer('responder');
+async function createOpticalAnswer(description) {
+  if (!pairingActive || buildingSignal || peerRole !== 'responder') return;
+  buildingSignal = true;
+  setPairingCopy('3 · Preparing the answer', 'Offer received',
+    'This phone is returning the final handshake through its screen.', 70);
+  try {
+    const connection = peer;
     await connection.setRemoteDescription(description);
     const answer = await connection.createAnswer();
     await connection.setLocalDescription(answer);
     await waitForIceGathering(connection);
-    const answerCode = await encodeDescription(connection.localDescription);
-    showSignalCode(answerCode, 'answer');
+    if (!pairingActive || peer !== connection) return;
+    const frames = await buildSignalFrames('A', connection.localDescription);
+    displaySignalFrames(frames, 'answer');
+    setPairingCopy('3 · Returning the answer', 'Almost connected',
+      'Keep the screens aligned until both phones confirm the direct channel.', 82);
+  } catch (error) {
+    failPairing(error);
+  } finally {
+    buildingSignal = false;
+  }
+}
+
+async function finishSignal(kind, bytes) {
+  const description = await decodeSignalPayload(bytes, kind);
+  if (kind === 'O') {
+    if (peerRole !== 'responder' || !peer) return;
+    await createOpticalAnswer(description);
     return;
   }
-
-  if (!peer || peerRole !== 'initiator')
-    throw new Error('Create an invite on this phone before scanning an answer.');
-  ui.pairLoadingTitle.textContent = 'Opening the direct channel…';
-  ui.pairLoadingCopy.textContent = 'The QR handshake is complete.';
+  if (peerRole !== 'initiator' || !peer) return;
+  setPairingCopy('4 · Opening the channel', 'Answer received',
+    'The optical handshake is complete. Opening WebRTC now…', 94);
+  stopSignalAnimation();
   await peer.setRemoteDescription(description);
   setConnectionStatus('pairing', 'Connecting', 'Opening the persistent data channel…');
 }
 
-function parseSignalFrame(raw) {
-  if (typeof raw !== 'string' || !raw.startsWith(`${FRAME_PREFIX}|`)) return null;
-  const parts = raw.split('|');
-  if (parts.length !== 6 || !/^[0-9a-f]{8}$/.test(parts[1]) ||
-      !/^\d+$/.test(parts[2]) || !/^\d+$/.test(parts[3]) || !/^[0-9a-f]{8}$/.test(parts[4])) return null;
-  const index = Number(parts[2]);
-  const total = Number(parts[3]);
-  if (total < 1 || total > 30 || index < 0 || index >= total || !parts[5]) return null;
-  return { id: parts[1], index, total, hash: parts[4], piece: parts[5] };
+async function ingestSignalFrame(raw) {
+  if (!pairingActive || !pairingSession || signalFinishing) return;
+  const parsed = parseSignalFrame(raw);
+  if (!parsed) return;
+  const expectedKind = peerRole === 'initiator' ? 'A' : peerRole === 'responder' ? 'O' : '';
+  if (!expectedKind || parsed.kind !== expectedKind || parsed.frame.session !== pairingSessionNumber) return;
+
+  if (!signalDecoder || signalDecodeKind !== parsed.kind) {
+    resetSignalDecoder();
+    signalDecodeKind = parsed.kind;
+    signalSourceSymbols = sourceSymbolEstimate(parsed.frame.encodedLength, parsed.frame.transportSize);
+    try { signalDecoder = new RaptorQDecoder(parsed.frame.encodedLength, parsed.frame.transportSize); }
+    catch { resetSignalDecoder(); return; }
+  }
+
+  const key = packetKey(parsed.frame.packet);
+  if (!key || signalSeenPackets.has(key)) return;
+  signalSeenPackets.add(key);
+  signalAcceptedPackets++;
+  const ratio = Math.min(1, signalAcceptedPackets / Math.max(1, signalSourceSymbols));
+  const base = parsed.kind === 'O' ? 42 : 82;
+  setPairingProgress(base + ratio * 10);
+  ui.pairStatus.textContent = `Reading ${parsed.kind === 'O' ? 'offer' : 'answer'} light frames · ${signalAcceptedPackets} received`;
+
+  try {
+    const decoded = signalDecoder.push(parsed.frame.packet);
+    if (!decoded) return;
+    signalFinishing = true;
+    const payload = new Uint8Array(decoded);
+    try { signalDecoder.free(); } catch {}
+    signalDecoder = null;
+    await finishSignal(parsed.kind, payload);
+    resetSignalDecoder();
+  } catch (error) {
+    resetSignalDecoder();
+    if (pairingActive) failPairing(error);
+  }
+}
+
+async function acceptHello(raw) {
+  const match = /^NCH1\|([0-9a-f]{16})$/.exec(raw);
+  if (!pairingActive || !match || match[1] === localHello || remoteHello) return;
+  remoteHello = match[1];
+  if (remoteHello === localHello) {
+    localHello = randomHex();
+    remoteHello = '';
+    displayHello();
+    return;
+  }
+
+  const ordered = [localHello, remoteHello].sort();
+  pairingSession = fnvHash(`${ordered[0]}:${ordered[1]}`);
+  pairingSessionNumber = Number.parseInt(pairingSession, 16) >>> 0;
+  navigator.vibrate?.(45);
+  resetSignalDecoder();
+
+  if (localHello === ordered[0]) {
+    peerRole = 'initiator';
+    await createOpticalOffer();
+  } else {
+    setupPeer('responder');
+    setPairingCopy('2 · Receiving the offer', 'The phones found each other',
+      'Keep the top edges aligned while this phone collects the offer.', 38);
+  }
 }
 
 async function consumeScannedValue(raw) {
-  if (consumingSignal) return;
-  if (raw.startsWith(`${SIGNAL_PREFIX}.`)) {
-    consumingSignal = true;
-    try { await acceptSignalCode(raw, scanExpectedType); }
-    finally { consumingSignal = false; }
+  if (typeof raw !== 'string') return;
+  if (raw.startsWith(`${HELLO_PREFIX}|`)) {
+    await acceptHello(raw);
     return;
   }
-  const frame = parseSignalFrame(raw);
-  if (!frame) return;
-  if (!scannedBundle || scannedBundle.id !== frame.id || scannedBundle.hash !== frame.hash) {
-    scannedBundle = { id: frame.id, hash: frame.hash, total: frame.total, pieces: new Map() };
-  }
-  if (frame.total !== scannedBundle.total) return;
-  scannedBundle.pieces.set(frame.index, frame.piece);
-  ui.scannerStatus.textContent = `Reading pairing frames · ${scannedBundle.pieces.size} / ${frame.total}`;
-  if (scannedBundle.pieces.size !== frame.total) return;
-  const code = Array.from({ length: frame.total }, (_, index) => scannedBundle.pieces.get(index)).join('');
-  if (fnvHash(code) !== frame.hash) {
-    scannedBundle = null;
-    ui.scannerStatus.textContent = 'A damaged pairing sequence was ignored.';
-    return;
-  }
-  consumingSignal = true;
-  try { await acceptSignalCode(code, scanExpectedType); }
-  catch (error) {
-    showToast(error.message);
-    setPairView('scanner');
-    ui.scannerStatus.textContent = error.message;
-  } finally {
-    consumingSignal = false;
-  }
+  if (raw.startsWith(`${SIGNAL_FRAME_PREFIX}|`)) await ingestSignalFrame(raw);
 }
 
 async function chooseBarcodeDecoder() {
@@ -722,39 +906,33 @@ function scannerLoop(timestamp) {
   scannerBusy = false;
 }
 
-async function startScanner(expectedType) {
-  stopSignalAnimation();
+async function startFrontCamera() {
   stopScanner();
-  if (expectedType === 'offer') {
-    teardownPeer({ keepMetrics: false });
-    signalCode = '';
-    signalFrames = [];
+  ui.cameraState.dataset.state = 'starting';
+  ui.cameraState.textContent = 'Starting front camera…';
+  await chooseBarcodeDecoder();
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { ideal: 'user' },
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 24, max: 30 }
+    },
+    audio: false
+  });
+  if (!pairingActive) {
+    stream.getTracks().forEach(track => track.stop());
+    return;
   }
-  scanExpectedType = expectedType;
-  scannedBundle = null;
-  consumingSignal = false;
-  setPairView('scanner');
-  ui.scannerTitle.textContent = expectedType === 'answer' ? 'Scan their answer' : 'Scan their invite';
-  ui.scannerStatus.textContent = 'Starting camera…';
-  try {
-    await chooseBarcodeDecoder();
-    cameraStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
-      audio: false
-    });
-    ui.scannerVideo.srcObject = cameraStream;
-    await ui.scannerVideo.play();
-    scannerGeneration++;
-    scannerLastDecode = 0;
-    scannerBusy = false;
-    ui.scannerStatus.textContent = 'Point the camera at the animated QR code.';
-    scannerRaf = requestAnimationFrame(scannerLoop);
-  } catch (error) {
-    stopScanner();
-    ui.scannerStatus.textContent = error?.name === 'NotAllowedError'
-      ? 'Camera permission is required. You can paste the code instead.'
-      : 'The camera could not be opened.';
-  }
+  cameraStream = stream;
+  ui.scannerVideo.srcObject = cameraStream;
+  await ui.scannerVideo.play();
+  scannerGeneration++;
+  scannerLastDecode = 0;
+  scannerBusy = false;
+  ui.cameraState.dataset.state = 'active';
+  ui.cameraState.textContent = 'Front camera active · scanning light';
+  scannerRaf = requestAnimationFrame(scannerLoop);
 }
 
 function stopScanner() {
@@ -765,6 +943,69 @@ function stopScanner() {
   cameraStream = null;
   ui.scannerVideo.srcObject = null;
   scannerBusy = false;
+}
+
+function failPairing(error) {
+  pairingActive = false;
+  buildingSignal = false;
+  stopScanner();
+  stopSignalAnimation();
+  resetSignalDecoder();
+  teardownPeer({ keepMetrics: false });
+  ui.cameraState.dataset.state = 'error';
+  ui.cameraState.textContent = 'Pairing stopped';
+  setConnectionStatus('failed', 'Pairing unavailable', 'Press Share on both phones to try again.');
+  setPairingCopy('Pairing stopped', 'The phones could not connect',
+    error?.name === 'NotAllowedError'
+      ? 'Front-camera permission is required on both phones.'
+      : error?.message || 'Move the phones apart slightly and try again.', 8);
+}
+
+function resetPairingState() {
+  resetSignalDecoder();
+  localHello = '';
+  remoteHello = '';
+  pairingSession = '';
+  pairingSessionNumber = 0;
+  signalKind = '';
+  signalFrames = [];
+  signalFrameIndex = 0;
+  buildingSignal = false;
+}
+
+function cancelPairDance() {
+  const wasPairing = pairingActive;
+  pairingActive = false;
+  stopScanner();
+  stopSignalAnimation();
+  resetPairingState();
+  if (wasPairing && !isConnected()) {
+    teardownPeer({ keepMetrics: false });
+    setConnectionStatus('offline', 'Not connected', 'Pair two nearby devices to begin.');
+  }
+  closePairing();
+}
+
+async function beginPairDance() {
+  stopScanner();
+  stopSignalAnimation();
+  teardownPeer({ keepMetrics: false });
+  resetPairingState();
+  pairingActive = true;
+  localHello = randomHex();
+  openPairing();
+  setPairView('dance');
+  ui.cameraState.dataset.state = 'starting';
+  ui.cameraState.textContent = 'Starting front camera…';
+  setPairingCopy('1 · Finding the other phone', 'Put both screens face to face',
+    'Keep the top edges aligned, about 25–35 cm apart. The phones will choose their roles automatically.', 8);
+  displayHello();
+  setConnectionStatus('pairing', 'Pairing devices', 'Both front cameras are looking for the other screen.');
+  try {
+    await Promise.all([ensureRaptor(), startFrontCamera()]);
+  } catch (error) {
+    if (pairingActive) failPairing(error);
+  }
 }
 
 function scrollMessages() {
@@ -1073,47 +1314,23 @@ ui.share.addEventListener('click', () => {
     setPairView('connected');
     return;
   }
-  if (signalCode && peer && !['failed', 'closed'].includes(peer.connectionState)) {
-    openPairing();
-    showSignalCode(signalCode, signalKind);
-    return;
-  }
-  createInvite();
+  beginPairDance();
 });
 ui.disconnect.addEventListener('click', disconnectPeer);
 ui.disconnectInSheet.addEventListener('click', () => {
   closePairing();
   disconnectPeer();
 });
-ui.closePairing.addEventListener('click', closePairing);
+ui.closePairing.addEventListener('click', () => {
+  if (pairingActive && !isConnected()) cancelPairDance();
+  else closePairing();
+});
 ui.overlay.addEventListener('click', event => {
-  if (event.target === ui.overlay) closePairing();
+  if (event.target !== ui.overlay) return;
+  if (pairingActive && !isConnected()) cancelPairDance();
+  else closePairing();
 });
-ui.scanAnswer.addEventListener('click', () => startScanner('answer'));
-ui.scanInstead.addEventListener('click', () => startScanner('offer'));
-ui.cancelScanner.addEventListener('click', () => {
-  stopScanner();
-  if (signalCode) showSignalCode(signalCode, signalKind);
-  else {
-    setPairView('loading');
-    ui.pairLoadingTitle.textContent = 'Scan cancelled';
-    ui.pairLoadingCopy.textContent = 'Close this panel or create a new invite.';
-  }
-});
-ui.copyCode.addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(ui.manualCode.value);
-    showToast('Pairing code copied');
-  } catch { showToast('Copy is unavailable. Select the code manually.'); }
-});
-ui.useCode.addEventListener('click', async () => {
-  const code = ui.remoteCode.value.trim();
-  if (!code) return;
-  try {
-    const expected = peerRole === 'initiator' ? 'answer' : 'offer';
-    await acceptSignalCode(code, expected);
-  } catch (error) { showToast(error.message); }
-});
+ui.cancelPairing.addEventListener('click', cancelPairDance);
 ui.composer.addEventListener('submit', submitMessage);
 ui.input.addEventListener('input', updateComposer);
 ui.imageButton.addEventListener('click', () => ui.imageInput.click());
@@ -1132,8 +1349,10 @@ window.addEventListener('pageshow', () => {
   if (isConnected()) startHeartbeat();
 });
 window.addEventListener('pagehide', () => {
+  pairingActive = false;
   stopScanner();
   stopSignalAnimation();
+  resetSignalDecoder();
   stopHeartbeat();
 });
 window.addEventListener('beforeunload', () => {
