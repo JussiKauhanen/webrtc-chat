@@ -1,4 +1,4 @@
-import { QRCode, jsQR } from './assets/qr-libs.js';
+import { QRCode, jsQR } from '/jussikauhanen/assets/qr-libs.js';
 
 const $ = selector => document.querySelector(selector);
 const encoder = new TextEncoder();
