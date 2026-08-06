@@ -69,8 +69,28 @@
 
       <div class="pair-view pair-dance" id="pairDance">
         <div class="optical-zone">
-          <canvas id="pairQrCanvas" aria-label="Animated face-to-face pairing code"></canvas>
-          <span class="camera-state" id="cameraState">Starting front camera…</span>
+          <div class="optical-code">
+            <canvas id="pairQrCanvas" aria-label="Animated face-to-face pairing code"></canvas>
+            <span class="camera-state" id="cameraState">Starting front camera…</span>
+          </div>
+
+          <div class="targeting-guide" id="targetingGuide" data-state="searching"
+               aria-label="Visual phone alignment guide">
+            <span class="targeting-kicker">Camera alignment</span>
+            <div class="targeting-field">
+              <span class="target-crosshair" aria-hidden="true"></span>
+              <div class="target-phone" aria-hidden="true">
+                <i></i><small>this device</small>
+              </div>
+              <div class="tracked-phone" id="trackedPhone" aria-hidden="true">
+                <i></i><small>other phone</small>
+              </div>
+            </div>
+            <div class="targeting-copy">
+              <strong id="alignmentScore">Looking for the other phone</strong>
+              <span id="alignmentHint">Move its outline over the dashed target.</span>
+            </div>
+          </div>
         </div>
 
         <div class="dance-copy">

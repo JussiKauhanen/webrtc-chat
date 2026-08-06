@@ -56,6 +56,10 @@ const ui = {
   pairStatus: $('#pairStatus'),
   pairProgress: $('#pairProgress'),
   cameraState: $('#cameraState'),
+  targetingGuide: $('#targetingGuide'),
+  trackedPhone: $('#trackedPhone'),
+  alignmentScore: $('#alignmentScore'),
+  alignmentHint: $('#alignmentHint'),
   cancelPairing: $('#cancelPairing'),
   scannerVideo: $('#scannerVideo'),
   scannerCanvas: $('#scannerCanvas'),
@@ -105,6 +109,7 @@ let scannerGeneration = 0;
 let scannerBusy = false;
 let scannerLastDecode = 0;
 let barcodeDetector = null;
+let targetLastSeen = 0;
 
 let pendingImage = null;
 let pendingImageUrl = '';
@@ -882,6 +887,94 @@ function captureScannerFrame() {
   return context.getImageData(0, 0, drawWidth, drawHeight);
 }
 
+function isNearChatOpticalFrame(value) {
+  return typeof value === 'string' &&
+    (value.startsWith(`${HELLO_PREFIX}|`) || value.startsWith(`${SIGNAL_FRAME_PREFIX}|`));
+}
+
+function barcodeCorners(result) {
+  if (Array.isArray(result?.cornerPoints) && result.cornerPoints.length >= 4)
+    return result.cornerPoints.map(point => ({ x: point.x, y: point.y }));
+  const box = result?.boundingBox;
+  if (!box) return null;
+  return [
+    { x: box.x, y: box.y },
+    { x: box.x + box.width, y: box.y },
+    { x: box.x + box.width, y: box.y + box.height },
+    { x: box.x, y: box.y + box.height }
+  ];
+}
+
+function jsQrCorners(result) {
+  const location = result?.location;
+  if (!location) return null;
+  const points = [
+    location.topLeftCorner,
+    location.topRightCorner,
+    location.bottomRightCorner,
+    location.bottomLeftCorner
+  ];
+  return points.every(point => Number.isFinite(point?.x) && Number.isFinite(point?.y)) ? points : null;
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function resetTargetingGuide() {
+  targetLastSeen = 0;
+  ui.targetingGuide.dataset.state = 'searching';
+  ui.targetingGuide.style.setProperty('--track-x', '77%');
+  ui.targetingGuide.style.setProperty('--track-y', '30%');
+  ui.targetingGuide.style.setProperty('--track-scale', '.72');
+  ui.alignmentScore.textContent = 'Looking for the other phone';
+  ui.alignmentHint.textContent = 'Move its outline over the dashed target.';
+}
+
+function markTargetLost() {
+  if (performance.now() - targetLastSeen < 700) return;
+  ui.targetingGuide.dataset.state = 'searching';
+  ui.alignmentScore.textContent = 'Looking for the other phone';
+  ui.alignmentHint.textContent = 'Keep its illuminated code inside the camera view.';
+}
+
+function updateTargetingGuide(points, frameWidth = ui.scannerVideo.videoWidth, frameHeight = ui.scannerVideo.videoHeight) {
+  if (!points?.length || !frameWidth || !frameHeight) return;
+  const xs = points.map(point => point.x);
+  const ys = points.map(point => point.y);
+  const left = Math.min(...xs);
+  const right = Math.max(...xs);
+  const top = Math.min(...ys);
+  const bottom = Math.max(...ys);
+  const normalizedX = ((left + right) / 2) / frameWidth;
+  const normalizedY = ((top + bottom) / 2) / frameHeight;
+  const qrRatio = Math.max((right - left) / frameWidth, (bottom - top) / frameHeight);
+  if (![normalizedX, normalizedY, qrRatio].every(Number.isFinite) || qrRatio <= 0) return;
+
+  const desiredQrRatio = .13;
+  const dx = normalizedX - .5;
+  const dy = normalizedY - .5;
+  const positionError = Math.min(1.5, Math.hypot(dx, dy) / .42);
+  const sizeError = Math.min(1.5, Math.abs(Math.log(qrRatio / desiredQrRatio) / Math.log(2)));
+  const score = clamp(1 - positionError * .68 - sizeError * .32, 0, 1);
+  const state = score >= .72 ? 'aligned' : score >= .4 ? 'close' : 'far';
+  const trackX = clamp(50 + dx * 100, 12, 88);
+  const trackY = clamp(50 + dy * 100, 16, 84);
+  const trackScale = clamp(qrRatio / desiredQrRatio, .5, 1.55);
+
+  targetLastSeen = performance.now();
+  ui.targetingGuide.dataset.state = state;
+  ui.targetingGuide.style.setProperty('--track-x', `${trackX.toFixed(1)}%`);
+  ui.targetingGuide.style.setProperty('--track-y', `${trackY.toFixed(1)}%`);
+  ui.targetingGuide.style.setProperty('--track-scale', trackScale.toFixed(2));
+  ui.alignmentScore.textContent = state === 'aligned' ? 'Aligned · hold still' : `${Math.round(score * 100)}% aligned`;
+
+  if (state === 'aligned') ui.alignmentHint.textContent = 'Keep both devices steady while the light frames transfer.';
+  else if (qrRatio < desiredQrRatio * .7) ui.alignmentHint.textContent = 'Move the other phone closer.';
+  else if (qrRatio > desiredQrRatio * 1.4) ui.alignmentHint.textContent = 'Move the other phone slightly farther away.';
+  else ui.alignmentHint.textContent = 'Move the wireframe over the dashed target.';
+}
+
 function scannerLoop(timestamp) {
   const generation = scannerGeneration;
   scannerRaf = requestAnimationFrame(scannerLoop);
@@ -892,7 +985,11 @@ function scannerLoop(timestamp) {
     barcodeDetector.detect(ui.scannerVideo)
       .then(results => {
         if (generation !== scannerGeneration) return;
-        results.forEach(result => consumeScannedValue(result.rawValue).catch(() => {}));
+        const nearChatResults = results.filter(result => isNearChatOpticalFrame(result.rawValue));
+        if (nearChatResults.length) {
+          updateTargetingGuide(barcodeCorners(nearChatResults[0]));
+          nearChatResults.forEach(result => consumeScannedValue(result.rawValue).catch(() => {}));
+        } else markTargetLost();
       })
       .catch(() => {})
       .finally(() => { scannerBusy = false; });
@@ -901,7 +998,10 @@ function scannerLoop(timestamp) {
   try {
     const image = captureScannerFrame();
     const result = image && jsQR(image.data, image.width, image.height, { inversionAttempts: 'dontInvert' });
-    if (result) consumeScannedValue(result.data).catch(error => showToast(error.message));
+    if (result && isNearChatOpticalFrame(result.data)) {
+      updateTargetingGuide(jsQrCorners(result), image.width, image.height);
+      consumeScannedValue(result.data).catch(error => showToast(error.message));
+    } else markTargetLost();
   } catch {}
   scannerBusy = false;
 }
@@ -995,6 +1095,7 @@ async function beginPairDance() {
   localHello = randomHex();
   openPairing();
   setPairView('dance');
+  resetTargetingGuide();
   ui.cameraState.dataset.state = 'starting';
   ui.cameraState.textContent = 'Starting front camera…';
   setPairingCopy('1 · Finding the other phone', 'Put both screens face to face',
