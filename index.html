@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f4f1e8">
   <title>NearChat Direct</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=2026.08.08.1">
 </head>
 <body>
   <main class="app" aria-label="NearChat Direct">
@@ -70,26 +70,15 @@
       <div class="pair-view pair-dance" id="pairDance">
         <div class="optical-zone">
           <div class="optical-code">
-            <canvas id="pairQrCanvas" aria-label="Animated face-to-face pairing code"></canvas>
+            <div class="qr-wall" id="qrWall" aria-label="Animated face-to-face pairing codes">
+              <canvas class="pair-qr-canvas" aria-label="Primary face-to-face pairing code"></canvas>
+              <canvas class="pair-qr-canvas" aria-hidden="true"></canvas>
+              <canvas class="pair-qr-canvas" aria-hidden="true"></canvas>
+              <canvas class="pair-qr-canvas" aria-hidden="true"></canvas>
+              <canvas class="pair-qr-canvas" aria-hidden="true"></canvas>
+              <canvas class="pair-qr-canvas" aria-hidden="true"></canvas>
+            </div>
             <span class="camera-state" id="cameraState">Starting front camera…</span>
-          </div>
-
-          <div class="targeting-guide" id="targetingGuide" data-state="searching"
-               aria-label="Visual phone alignment guide">
-            <span class="targeting-kicker">Camera alignment</span>
-            <div class="targeting-field">
-              <span class="target-crosshair" aria-hidden="true"></span>
-              <div class="target-phone" aria-hidden="true">
-                <i></i><small>this device</small>
-              </div>
-              <div class="tracked-phone" id="trackedPhone" aria-hidden="true">
-                <i></i><small>other phone</small>
-              </div>
-            </div>
-            <div class="targeting-copy">
-              <strong id="alignmentScore">Looking for the other phone</strong>
-              <span id="alignmentHint">Move its outline over the dashed target.</span>
-            </div>
           </div>
         </div>
 
@@ -103,14 +92,27 @@
           <span id="pairProgress"></span>
         </div>
 
-        <div class="alignment-guide" aria-hidden="true">
-          <span></span><span></span>
-          <small>top edges aligned</small>
-        </div>
-
         <video id="scannerVideo" class="camera-feed" playsinline muted autoplay></video>
         <canvas id="scannerCanvas" hidden></canvas>
         <button class="secondary cancel-pairing" id="cancelPairing" type="button">Cancel pairing</button>
+
+        <div class="targeting-guide" id="targetingGuide" data-state="searching"
+             aria-label="Visual phone alignment guide">
+          <span class="targeting-kicker">Camera alignment</span>
+          <div class="targeting-field">
+            <span class="target-crosshair" aria-hidden="true"></span>
+            <div class="target-phone" aria-hidden="true">
+              <i></i><small>this device</small>
+            </div>
+            <div class="tracked-phone" id="trackedPhone" aria-hidden="true">
+              <i></i><small>other phone</small>
+            </div>
+          </div>
+          <div class="targeting-copy">
+            <strong id="alignmentScore">Looking for the other phone</strong>
+            <span id="alignmentHint">Move its outline over the dashed target.</span>
+          </div>
+        </div>
       </div>
 
       <div class="pair-view connected-view" id="pairConnected" hidden>
@@ -123,6 +125,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js"></script>
+  <script type="module" src="app.js?v=2026.08.08.1"></script>
 </body>
 </html>

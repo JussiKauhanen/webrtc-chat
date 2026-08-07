@@ -2,13 +2,14 @@ import { QRCode, jsQR } from './assets/qr-libs.js';
 import initRaptor, { RaptorQDecoder, encode_packets } from './assets/raptorq.js';
 
 const $ = selector => document.querySelector(selector);
+const $$ = selector => Array.from(document.querySelectorAll(selector));
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 const HELLO_PREFIX = 'NCH1';
 const SIGNAL_FRAME_PREFIX = 'NCS1';
-const SIGNAL_FRAME_MS = 135;
-const RAPTOR_TRANSPORT_BYTES = 260;
+const SIGNAL_FRAME_MS = 220;
+const RAPTOR_TRANSPORT_BYTES = 150;
 const RAPTOR_REPAIR_PERCENT = 300;
 const RAPTOR_FRAME_MAGIC = new Uint8Array([0x4e, 0x43, 0x53, 0x31]); // NCS1
 const RAPTOR_HEADER_BYTES = 16;
@@ -50,7 +51,7 @@ const ui = {
   closePairing: $('#closePairing'),
   pairDance: $('#pairDance'),
   pairConnected: $('#pairConnected'),
-  qrCanvas: $('#pairQrCanvas'),
+  qrCanvases: $$('.pair-qr-canvas'),
   pairPhase: $('#pairPhase'),
   pairStatusTitle: $('#pairStatusTitle'),
   pairStatus: $('#pairStatus'),
@@ -628,7 +629,7 @@ async function buildSignalFrames(kind, description) {
   }))}`);
 }
 
-function renderQr(text) {
+function renderQr(text, canvas) {
   const qr = QRCode.create([{ data: text, mode: 'byte' }], { errorCorrectionLevel: 'L' });
   const quiet = 4;
   const modules = qr.modules.size;
@@ -636,9 +637,9 @@ function renderQr(text) {
   const target = Math.min(660, Math.max(300, Math.round((window.devicePixelRatio || 1) * 330)));
   const scale = Math.max(2, Math.floor(target / dimension));
   const pixels = dimension * scale;
-  const context = ui.qrCanvas.getContext('2d');
-  ui.qrCanvas.width = pixels;
-  ui.qrCanvas.height = pixels;
+  const context = canvas.getContext('2d');
+  canvas.width = pixels;
+  canvas.height = pixels;
   context.fillStyle = '#ffffff';
   context.fillRect(0, 0, pixels, pixels);
   context.fillStyle = '#153f33';
@@ -657,7 +658,10 @@ function stopSignalAnimation() {
 
 function paintSignalFrame() {
   if (!signalFrames.length) return;
-  renderQr(signalFrames[signalFrameIndex]);
+  ui.qrCanvases.forEach((canvas, index) => {
+    renderQr(signalFrames[(signalFrameIndex + index) % signalFrames.length], canvas);
+  });
+  // Advance every tile by one so the single-code jsQR fallback also sees every frame.
   signalFrameIndex = (signalFrameIndex + 1) % signalFrames.length;
 }
 
