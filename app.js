@@ -2,14 +2,16 @@ import { QRCode, jsQR } from './assets/qr-libs.js';
 import initRaptor, { RaptorQDecoder, encode_packets } from './assets/raptorq.js';
 
 const $ = selector => document.querySelector(selector);
-const $$ = selector => Array.from(document.querySelectorAll(selector));
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 const HELLO_PREFIX = 'NCH1';
 const SIGNAL_FRAME_PREFIX = 'NCS1';
-const SIGNAL_FRAME_MS = 220;
-const RAPTOR_TRANSPORT_BYTES = 150;
+const SIGNAL_FRAME_MS = 280;
+const QR_VIEW_MS = 900;
+const CAMERA_VIEW_MS = 300;
+const LOCKED_QR_VIEW_MS = 2400;
+const RAPTOR_TRANSPORT_BYTES = 260;
 const RAPTOR_REPAIR_PERCENT = 300;
 const RAPTOR_FRAME_MAGIC = new Uint8Array([0x4e, 0x43, 0x53, 0x31]); // NCS1
 const RAPTOR_HEADER_BYTES = 16;
@@ -51,14 +53,14 @@ const ui = {
   closePairing: $('#closePairing'),
   pairDance: $('#pairDance'),
   pairConnected: $('#pairConnected'),
-  qrCanvases: $$('.pair-qr-canvas'),
+  opticalStage: $('#opticalStage'),
+  qrCanvas: $('#pairQrCanvas'),
+  detectedOutline: $('#detectedOutline'),
   pairPhase: $('#pairPhase'),
   pairStatusTitle: $('#pairStatusTitle'),
   pairStatus: $('#pairStatus'),
   pairProgress: $('#pairProgress'),
   cameraState: $('#cameraState'),
-  targetingGuide: $('#targetingGuide'),
-  trackedPhone: $('#trackedPhone'),
   alignmentScore: $('#alignmentScore'),
   alignmentHint: $('#alignmentHint'),
   cancelPairing: $('#cancelPairing'),
@@ -111,6 +113,8 @@ let scannerBusy = false;
 let scannerLastDecode = 0;
 let barcodeDetector = null;
 let targetLastSeen = 0;
+let opticalViewTimer = 0;
+let lastDetectionFeedback = 0;
 
 let pendingImage = null;
 let pendingImageUrl = '';
@@ -629,7 +633,7 @@ async function buildSignalFrames(kind, description) {
   }))}`);
 }
 
-function renderQr(text, canvas) {
+function renderQr(text) {
   const qr = QRCode.create([{ data: text, mode: 'byte' }], { errorCorrectionLevel: 'L' });
   const quiet = 4;
   const modules = qr.modules.size;
@@ -637,9 +641,9 @@ function renderQr(text, canvas) {
   const target = Math.min(660, Math.max(300, Math.round((window.devicePixelRatio || 1) * 330)));
   const scale = Math.max(2, Math.floor(target / dimension));
   const pixels = dimension * scale;
-  const context = canvas.getContext('2d');
-  canvas.width = pixels;
-  canvas.height = pixels;
+  const context = ui.qrCanvas.getContext('2d');
+  ui.qrCanvas.width = pixels;
+  ui.qrCanvas.height = pixels;
   context.fillStyle = '#ffffff';
   context.fillRect(0, 0, pixels, pixels);
   context.fillStyle = '#153f33';
@@ -658,10 +662,7 @@ function stopSignalAnimation() {
 
 function paintSignalFrame() {
   if (!signalFrames.length) return;
-  ui.qrCanvases.forEach((canvas, index) => {
-    renderQr(signalFrames[(signalFrameIndex + index) % signalFrames.length], canvas);
-  });
-  // Advance every tile by one so the single-code jsQR fallback also sees every frame.
+  renderQr(signalFrames[signalFrameIndex]);
   signalFrameIndex = (signalFrameIndex + 1) % signalFrames.length;
 }
 
@@ -691,6 +692,36 @@ function displaySignalFrames(frames, kind) {
   signalKind = kind;
   signalFrames = interleaved;
   startSignalAnimation();
+}
+
+function setOpticalView(view) {
+  ui.opticalStage.dataset.view = view;
+}
+
+function stopOpticalViewCycle() {
+  clearTimeout(opticalViewTimer);
+  opticalViewTimer = 0;
+  setOpticalView('qr');
+}
+
+function showQrView() {
+  if (!pairingActive || !cameraStream) return;
+  setOpticalView('qr');
+  const recentlyDetected = performance.now() - targetLastSeen < 1500;
+  opticalViewTimer = window.setTimeout(showCameraView,
+    recentlyDetected ? LOCKED_QR_VIEW_MS : QR_VIEW_MS);
+}
+
+function showCameraView() {
+  if (!pairingActive || !cameraStream) return;
+  setOpticalView('camera');
+  opticalViewTimer = window.setTimeout(showQrView, CAMERA_VIEW_MS);
+}
+
+function startOpticalViewCycle() {
+  stopOpticalViewCycle();
+  setOpticalView('camera');
+  opticalViewTimer = window.setTimeout(showQrView, CAMERA_VIEW_MS);
 }
 
 function waitForIceGathering(connection, timeout = 5000) {
@@ -921,28 +952,38 @@ function jsQrCorners(result) {
   return points.every(point => Number.isFinite(point?.x) && Number.isFinite(point?.y)) ? points : null;
 }
 
-function clamp(value, minimum, maximum) {
-  return Math.min(maximum, Math.max(minimum, value));
-}
-
-function resetTargetingGuide() {
+function resetCameraFeedback() {
   targetLastSeen = 0;
-  ui.targetingGuide.dataset.state = 'searching';
-  ui.targetingGuide.style.setProperty('--track-x', '77%');
-  ui.targetingGuide.style.setProperty('--track-y', '30%');
-  ui.targetingGuide.style.setProperty('--track-scale', '.72');
-  ui.alignmentScore.textContent = 'Looking for the other phone';
-  ui.alignmentHint.textContent = 'Move its outline over the dashed target.';
+  lastDetectionFeedback = 0;
+  ui.opticalStage.dataset.detected = 'false';
+  ui.alignmentScore.textContent = 'Looking for the other screen';
+  ui.alignmentHint.textContent = 'Put its QR code inside the centre frame.';
 }
 
 function markTargetLost() {
   if (performance.now() - targetLastSeen < 700) return;
-  ui.targetingGuide.dataset.state = 'searching';
-  ui.alignmentScore.textContent = 'Looking for the other phone';
-  ui.alignmentHint.textContent = 'Keep its illuminated code inside the camera view.';
+  ui.opticalStage.dataset.detected = 'false';
+  ui.alignmentScore.textContent = 'No QR code in view';
+  ui.alignmentHint.textContent = 'Move the other screen into the centre frame.';
 }
 
-function updateTargetingGuide(points, frameWidth = ui.scannerVideo.videoWidth, frameHeight = ui.scannerVideo.videoHeight) {
+function positionDetectedOutline({ left, right, top, bottom }, frameWidth, frameHeight) {
+  const stage = ui.opticalStage.getBoundingClientRect();
+  if (!stage.width || !stage.height || !frameWidth || !frameHeight) return;
+  const scale = Math.min(stage.width / frameWidth, stage.height / frameHeight);
+  const renderedWidth = frameWidth * scale;
+  const renderedHeight = frameHeight * scale;
+  const offsetX = (stage.width - renderedWidth) / 2;
+  const offsetY = (stage.height - renderedHeight) / 2;
+
+  // The front-camera preview is mirrored, so reflect the detector's x coordinate.
+  ui.opticalStage.style.setProperty('--detected-left', `${offsetX + (frameWidth - right) * scale}px`);
+  ui.opticalStage.style.setProperty('--detected-top', `${offsetY + top * scale}px`);
+  ui.opticalStage.style.setProperty('--detected-width', `${(right - left) * scale}px`);
+  ui.opticalStage.style.setProperty('--detected-height', `${(bottom - top) * scale}px`);
+}
+
+function updateCameraFeedback(points, frameWidth = ui.scannerVideo.videoWidth, frameHeight = ui.scannerVideo.videoHeight) {
   if (!points?.length || !frameWidth || !frameHeight) return;
   const xs = points.map(point => point.x);
   const ys = points.map(point => point.y);
@@ -955,28 +996,31 @@ function updateTargetingGuide(points, frameWidth = ui.scannerVideo.videoWidth, f
   const qrRatio = Math.max((right - left) / frameWidth, (bottom - top) / frameHeight);
   if (![normalizedX, normalizedY, qrRatio].every(Number.isFinite) || qrRatio <= 0) return;
 
-  const desiredQrRatio = .13;
-  const dx = normalizedX - .5;
-  const dy = normalizedY - .5;
-  const positionError = Math.min(1.5, Math.hypot(dx, dy) / .42);
-  const sizeError = Math.min(1.5, Math.abs(Math.log(qrRatio / desiredQrRatio) / Math.log(2)));
-  const score = clamp(1 - positionError * .68 - sizeError * .32, 0, 1);
-  const state = score >= .72 ? 'aligned' : score >= .4 ? 'close' : 'far';
-  const trackX = clamp(50 + dx * 100, 12, 88);
-  const trackY = clamp(50 + dy * 100, 16, 84);
-  const trackScale = clamp(qrRatio / desiredQrRatio, .5, 1.55);
+  const now = performance.now();
+  const reacquired = !targetLastSeen || now - targetLastSeen > 1000;
+  targetLastSeen = now;
+  ui.opticalStage.dataset.detected = 'true';
+  positionDetectedOutline({ left, right, top, bottom }, frameWidth, frameHeight);
 
-  targetLastSeen = performance.now();
-  ui.targetingGuide.dataset.state = state;
-  ui.targetingGuide.style.setProperty('--track-x', `${trackX.toFixed(1)}%`);
-  ui.targetingGuide.style.setProperty('--track-y', `${trackY.toFixed(1)}%`);
-  ui.targetingGuide.style.setProperty('--track-scale', trackScale.toFixed(2));
-  ui.alignmentScore.textContent = state === 'aligned' ? 'Aligned · hold still' : `${Math.round(score * 100)}% aligned`;
+  const centreError = Math.hypot(normalizedX - .5, normalizedY - .5);
+  if (qrRatio < .1) {
+    ui.alignmentScore.textContent = 'QR detected · move closer';
+    ui.alignmentHint.textContent = 'Make the code larger inside the camera view.';
+  } else if (qrRatio > .68) {
+    ui.alignmentScore.textContent = 'QR detected · move back';
+    ui.alignmentHint.textContent = 'Keep the complete code visible.';
+  } else if (centreError > .3) {
+    ui.alignmentScore.textContent = 'QR detected · centre it';
+    ui.alignmentHint.textContent = 'Move the green box into the centre frame.';
+  } else {
+    ui.alignmentScore.textContent = 'Code detected · hold still';
+    ui.alignmentHint.textContent = 'The optical handshake is being received.';
+  }
 
-  if (state === 'aligned') ui.alignmentHint.textContent = 'Keep both devices steady while the light frames transfer.';
-  else if (qrRatio < desiredQrRatio * .7) ui.alignmentHint.textContent = 'Move the other phone closer.';
-  else if (qrRatio > desiredQrRatio * 1.4) ui.alignmentHint.textContent = 'Move the other phone slightly farther away.';
-  else ui.alignmentHint.textContent = 'Move the wireframe over the dashed target.';
+  if (reacquired && (!lastDetectionFeedback || now - lastDetectionFeedback > 1800)) {
+    lastDetectionFeedback = now;
+    navigator.vibrate?.(45);
+  }
 }
 
 function scannerLoop(timestamp) {
@@ -991,7 +1035,7 @@ function scannerLoop(timestamp) {
         if (generation !== scannerGeneration) return;
         const nearChatResults = results.filter(result => isNearChatOpticalFrame(result.rawValue));
         if (nearChatResults.length) {
-          updateTargetingGuide(barcodeCorners(nearChatResults[0]));
+          updateCameraFeedback(barcodeCorners(nearChatResults[0]));
           nearChatResults.forEach(result => consumeScannedValue(result.rawValue).catch(() => {}));
         } else markTargetLost();
       })
@@ -1003,7 +1047,7 @@ function scannerLoop(timestamp) {
     const image = captureScannerFrame();
     const result = image && jsQR(image.data, image.width, image.height, { inversionAttempts: 'dontInvert' });
     if (result && isNearChatOpticalFrame(result.data)) {
-      updateTargetingGuide(jsQrCorners(result), image.width, image.height);
+      updateCameraFeedback(jsQrCorners(result), image.width, image.height);
       consumeScannedValue(result.data).catch(error => showToast(error.message));
     } else markTargetLost();
   } catch {}
@@ -1035,11 +1079,13 @@ async function startFrontCamera() {
   scannerLastDecode = 0;
   scannerBusy = false;
   ui.cameraState.dataset.state = 'active';
-  ui.cameraState.textContent = 'Front camera active · scanning light';
+  ui.cameraState.textContent = 'Front camera active · scanning continuously';
+  startOpticalViewCycle();
   scannerRaf = requestAnimationFrame(scannerLoop);
 }
 
 function stopScanner() {
+  stopOpticalViewCycle();
   scannerGeneration++;
   cancelAnimationFrame(scannerRaf);
   scannerRaf = 0;
@@ -1099,11 +1145,11 @@ async function beginPairDance() {
   localHello = randomHex();
   openPairing();
   setPairView('dance');
-  resetTargetingGuide();
+  resetCameraFeedback();
   ui.cameraState.dataset.state = 'starting';
   ui.cameraState.textContent = 'Starting front camera…';
   setPairingCopy('1 · Finding the other phone', 'Put both screens face to face',
-    'Keep the top edges aligned, about 25–35 cm apart. The phones will choose their roles automatically.', 8);
+    'The live camera view will flash between QR frames so you can line up the other screen.', 8);
   displayHello();
   setConnectionStatus('pairing', 'Pairing devices', 'Both front cameras are looking for the other screen.');
   try {

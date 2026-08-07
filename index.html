@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f4f1e8">
   <title>NearChat Direct</title>
-  <link rel="stylesheet" href="styles.css?v=2026.08.08.1">
+  <link rel="stylesheet" href="styles.css?v=2026.08.08.2">
 </head>
 <body>
   <main class="app" aria-label="NearChat Direct">
@@ -69,17 +69,20 @@
 
       <div class="pair-view pair-dance" id="pairDance">
         <div class="optical-zone">
-          <div class="optical-code">
-            <div class="qr-wall" id="qrWall" aria-label="Animated face-to-face pairing codes">
-              <canvas class="pair-qr-canvas" aria-label="Primary face-to-face pairing code"></canvas>
-              <canvas class="pair-qr-canvas" aria-hidden="true"></canvas>
-              <canvas class="pair-qr-canvas" aria-hidden="true"></canvas>
-              <canvas class="pair-qr-canvas" aria-hidden="true"></canvas>
-              <canvas class="pair-qr-canvas" aria-hidden="true"></canvas>
-              <canvas class="pair-qr-canvas" aria-hidden="true"></canvas>
+          <div class="optical-stage" id="opticalStage" data-view="camera" data-detected="false">
+            <video id="scannerVideo" class="camera-feed" playsinline muted autoplay></video>
+            <canvas id="pairQrCanvas" class="pair-qr-canvas" aria-label="Animated face-to-face pairing code"></canvas>
+            <div class="camera-preview" aria-hidden="true">
+              <span class="preview-label">Your front camera</span>
+              <span class="preview-reticle"></span>
+              <span class="detected-outline" id="detectedOutline"></span>
+              <div class="preview-feedback">
+                <strong id="alignmentScore">Looking for the other screen</strong>
+                <span id="alignmentHint">Put its QR code inside the centre frame.</span>
+              </div>
             </div>
-            <span class="camera-state" id="cameraState">Starting front camera…</span>
           </div>
+          <span class="camera-state" id="cameraState">Starting front camera…</span>
         </div>
 
         <div class="dance-copy">
@@ -92,27 +95,8 @@
           <span id="pairProgress"></span>
         </div>
 
-        <video id="scannerVideo" class="camera-feed" playsinline muted autoplay></video>
         <canvas id="scannerCanvas" hidden></canvas>
         <button class="secondary cancel-pairing" id="cancelPairing" type="button">Cancel pairing</button>
-
-        <div class="targeting-guide" id="targetingGuide" data-state="searching"
-             aria-label="Visual phone alignment guide">
-          <span class="targeting-kicker">Camera alignment</span>
-          <div class="targeting-field">
-            <span class="target-crosshair" aria-hidden="true"></span>
-            <div class="target-phone" aria-hidden="true">
-              <i></i><small>this device</small>
-            </div>
-            <div class="tracked-phone" id="trackedPhone" aria-hidden="true">
-              <i></i><small>other phone</small>
-            </div>
-          </div>
-          <div class="targeting-copy">
-            <strong id="alignmentScore">Looking for the other phone</strong>
-            <span id="alignmentHint">Move its outline over the dashed target.</span>
-          </div>
-        </div>
       </div>
 
       <div class="pair-view connected-view" id="pairConnected" hidden>
@@ -125,6 +109,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=2026.08.08.1"></script>
+  <script type="module" src="app.js?v=2026.08.08.2"></script>
 </body>
 </html>
