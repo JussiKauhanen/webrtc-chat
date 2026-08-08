@@ -5,9 +5,11 @@ const $ = selector => document.querySelector(selector);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const HELLO_PREFIX = 'NCH1';
 const SIGNAL_FRAME_PREFIX = 'NCS1';
 const SIGNAL_FRAME_MS = 280;
+const HANDOFF_TONE_HZ = 2300;
+const HANDOFF_BEEP_MS = 150;
+const HANDOFF_GAP_MS = 110;
 const RAPTOR_TRANSPORT_BYTES = 260;
 const RAPTOR_REPAIR_PERCENT = 300;
 const RAPTOR_FRAME_MAGIC = new Uint8Array([0x4e, 0x43, 0x53, 0x31]); // NCS1
@@ -51,6 +53,8 @@ const ui = {
   pairDance: $('#pairDance'),
   pairConnected: $('#pairConnected'),
   opticalStage: $('#opticalStage'),
+  scanStage: $('#scanStage'),
+  qrStage: $('#qrStage'),
   qrCanvas: $('#pairQrCanvas'),
   detectedOutline: $('#detectedOutline'),
   pairPhase: $('#pairPhase'),
@@ -60,6 +64,8 @@ const ui = {
   cameraState: $('#cameraState'),
   alignmentScore: $('#alignmentScore'),
   alignmentHint: $('#alignmentHint'),
+  showCode: $('#showCode'),
+  scanCode: $('#scanCode'),
   cancelPairing: $('#cancelPairing'),
   scannerVideo: $('#scannerVideo'),
   scannerCanvas: $('#scannerCanvas'),
@@ -90,10 +96,9 @@ let signalFrames = [];
 let signalFrameIndex = 0;
 let signalTimer = 0;
 let pairingActive = false;
-let localHello = '';
-let remoteHello = '';
 let pairingSession = '';
 let pairingSessionNumber = 0;
+let pairingMode = 'scan';
 let buildingSignal = false;
 let raptorReady = null;
 let signalDecoder = null;
@@ -111,6 +116,17 @@ let scannerLastDecode = 0;
 let barcodeDetector = null;
 let targetLastSeen = 0;
 let lastDetectionFeedback = 0;
+
+let audioContext = null;
+let handoffAudioStream = null;
+let handoffAudioSource = null;
+let handoffAnalyser = null;
+let handoffAudioRaf = 0;
+let handoffToneActive = false;
+let handoffToneStarted = 0;
+let handoffBurstCount = 0;
+let handoffLastBurst = 0;
+let handoffTriggered = false;
 
 let pendingImage = null;
 let pendingImageUrl = '';
@@ -137,6 +153,15 @@ function setPairView(view) {
   ui.pairConnected.hidden = view !== 'connected';
 }
 
+function setPairMode(mode) {
+  pairingMode = mode;
+  ui.scanStage.hidden = mode !== 'scan';
+  ui.qrStage.hidden = mode === 'scan';
+  ui.showCode.hidden = mode !== 'scan' || peerRole !== null;
+  ui.scanCode.hidden = mode !== 'offer' || peerRole !== 'initiator';
+  if (mode !== 'scan') ui.opticalStage.dataset.detected = 'false';
+}
+
 function openPairing() {
   ui.overlay.hidden = false;
   document.body.style.overflow = 'hidden';
@@ -158,6 +183,134 @@ function setPairingCopy(phase, title, detail, progress) {
   ui.pairStatusTitle.textContent = title;
   ui.pairStatus.textContent = detail;
   setPairingProgress(progress);
+}
+
+function ensureAudioContext() {
+  if (audioContext) return audioContext;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+  audioContext = new AudioContextClass();
+  return audioContext;
+}
+
+async function primeAudio() {
+  const context = ensureAudioContext();
+  if (context?.state === 'suspended') await context.resume();
+  return context;
+}
+
+function stopHandoffListener() {
+  cancelAnimationFrame(handoffAudioRaf);
+  handoffAudioRaf = 0;
+  try { handoffAudioSource?.disconnect(); } catch {}
+  handoffAudioSource = null;
+  handoffAnalyser = null;
+  handoffAudioStream?.getTracks().forEach(track => track.stop());
+  handoffAudioStream = null;
+  handoffToneActive = false;
+  handoffToneStarted = 0;
+  handoffBurstCount = 0;
+  handoffLastBurst = 0;
+}
+
+function monitorHandoffTone() {
+  if (!handoffAnalyser || !handoffAudioStream) return;
+  handoffAudioRaf = requestAnimationFrame(monitorHandoffTone);
+  const levels = new Uint8Array(handoffAnalyser.frequencyBinCount);
+  handoffAnalyser.getByteFrequencyData(levels);
+  const binWidth = audioContext.sampleRate / handoffAnalyser.fftSize;
+  const targetBin = Math.round(HANDOFF_TONE_HZ / binWidth);
+  let targetLevel = 0;
+  for (let offset = -2; offset <= 2; offset++)
+    targetLevel = Math.max(targetLevel, levels[targetBin + offset] || 0);
+  let noiseTotal = 0;
+  let noiseSamples = 0;
+  for (let index = 8; index < Math.min(levels.length, 180); index += 4) {
+    if (Math.abs(index - targetBin) <= 4) continue;
+    noiseTotal += levels[index];
+    noiseSamples++;
+  }
+  const noiseFloor = noiseSamples ? noiseTotal / noiseSamples : 0;
+  const tonePresent = targetLevel > 145 && targetLevel > noiseFloor + 52;
+  const now = performance.now();
+
+  if (tonePresent && !handoffToneActive) {
+    handoffToneActive = true;
+    handoffToneStarted = now;
+    return;
+  }
+  if (tonePresent && handoffToneActive) {
+    if (now - handoffToneStarted > 450) {
+      handoffToneActive = false;
+      handoffBurstCount = 0;
+    }
+    return;
+  }
+  if (!tonePresent && handoffToneActive) {
+    const duration = now - handoffToneStarted;
+    handoffToneActive = false;
+    if (duration >= 70 && duration <= 360) {
+      const sincePrevious = handoffLastBurst ? now - handoffLastBurst : 0;
+      if (!sincePrevious || sincePrevious >= 120) {
+        handoffBurstCount = sincePrevious && sincePrevious < 650
+          ? handoffBurstCount + 1 : 1;
+        handoffLastBurst = now;
+      }
+      if (handoffBurstCount >= 3 && !handoffTriggered) {
+        handoffTriggered = true;
+        navigator.vibrate?.([45, 35, 80]);
+        switchToAnswerScanner(false).catch(error => {
+          if (pairingActive) failPairing(error);
+        });
+      }
+    }
+  }
+  if (handoffLastBurst && now - handoffLastBurst > 900) handoffBurstCount = 0;
+}
+
+async function startHandoffListener() {
+  stopHandoffListener();
+  handoffTriggered = false;
+  const context = await primeAudio();
+  if (!context || !navigator.mediaDevices?.getUserMedia)
+    throw new Error('Audio handoff is unavailable. Use “Scan answer now”.');
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    video: false
+  });
+  if (!pairingActive || peerRole !== 'initiator') {
+    stream.getTracks().forEach(track => track.stop());
+    return;
+  }
+  handoffAudioStream = stream;
+  handoffAudioSource = context.createMediaStreamSource(stream);
+  handoffAnalyser = context.createAnalyser();
+  handoffAnalyser.fftSize = 2048;
+  handoffAnalyser.smoothingTimeConstant = .2;
+  handoffAudioSource.connect(handoffAnalyser);
+  handoffAudioRaf = requestAnimationFrame(monitorHandoffTone);
+}
+
+async function playHandoffBeeps() {
+  const context = await primeAudio();
+  if (!context) return false;
+  const startAt = context.currentTime + .08;
+  for (let index = 0; index < 3; index++) {
+    const toneStart = startAt + index * (HANDOFF_BEEP_MS + HANDOFF_GAP_MS) / 1000;
+    const toneEnd = toneStart + HANDOFF_BEEP_MS / 1000;
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(HANDOFF_TONE_HZ, toneStart);
+    gain.gain.setValueAtTime(.0001, toneStart);
+    gain.gain.exponentialRampToValueAtTime(.34, toneStart + .012);
+    gain.gain.setValueAtTime(.34, Math.max(toneStart + .013, toneEnd - .018));
+    gain.gain.exponentialRampToValueAtTime(.0001, toneEnd);
+    oscillator.connect(gain).connect(context.destination);
+    oscillator.start(toneStart);
+    oscillator.stop(toneEnd + .02);
+  }
+  return true;
 }
 
 function setConnectionStatus(state, title, detail) {
@@ -320,6 +473,7 @@ function setConnectedUi() {
   pairingActive = false;
   buildingSignal = false;
   stopScanner();
+  stopHandoffListener();
   stopSignalAnimation();
   resetSignalDecoder();
   setConnectionStatus('connected', 'Live connection', 'Heartbeat active · messages send directly.');
@@ -344,7 +498,7 @@ function updateConnectionFromPeer() {
     if (channelIsOpen(chatChannel)) setConnectedUi();
     else {
       stopHeartbeat();
-      setConnectionStatus('stale', 'Chat channel closed', 'Press Share to pair the devices again.');
+      setConnectionStatus('stale', 'Chat channel closed', 'Press Connect to pair the devices again.');
       updateComposer();
     }
     return;
@@ -359,7 +513,7 @@ function updateConnectionFromPeer() {
   }
   if (state === 'failed') {
     stopHeartbeat();
-    setConnectionStatus('failed', 'Connection failed', 'Press Share to pair the devices again.');
+    setConnectionStatus('failed', 'Connection failed', 'Press Connect to pair the devices again.');
     updateComposer();
     return;
   }
@@ -421,7 +575,7 @@ function setupPeer(role) {
     bindChatChannel(peer.createDataChannel('near-chat', { ordered: true }));
     bindMediaChannel(peer.createDataChannel('near-media', { ordered: true }));
   }
-  setConnectionStatus('pairing', 'Pairing devices', 'Keep both screens face to face.');
+  setConnectionStatus('pairing', 'Pairing devices', 'Follow the QR handoff shown on both devices.');
   updateComposer();
   return peer;
 }
@@ -438,7 +592,7 @@ function teardownPeer({ keepMetrics = true } = {}) {
   peerRole = null;
   incomingImage = null;
   ui.disconnect.hidden = true;
-  ui.share.textContent = 'Share';
+  ui.share.textContent = 'Connect';
   if (!keepMetrics) resetMetrics();
   updateComposer();
 }
@@ -447,11 +601,10 @@ function disconnectPeer() {
   teardownPeer();
   stopSignalAnimation();
   stopScanner();
+  stopHandoffListener();
   resetSignalDecoder();
   pairingActive = false;
   buildingSignal = false;
-  localHello = '';
-  remoteHello = '';
   pairingSession = '';
   pairingSessionNumber = 0;
   signalFrames = [];
@@ -478,15 +631,6 @@ function base64UrlToBytes(value) {
 async function transformBytes(bytes, Transform) {
   const stream = new Blob([bytes]).stream().pipeThrough(new Transform('gzip'));
   return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-function fnvHash(value) {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index++) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
 function randomHex(byteCount = 8) {
@@ -669,24 +813,9 @@ function startSignalAnimation() {
   if (signalFrames.length > 1) signalTimer = setInterval(paintSignalFrame, SIGNAL_FRAME_MS);
 }
 
-function helloFrame() {
-  return `${HELLO_PREFIX}|${localHello}`;
-}
-
-function displayHello() {
-  signalKind = 'hello';
-  signalFrames = [helloFrame()];
-  startSignalAnimation();
-}
-
 function displaySignalFrames(frames, kind) {
-  const interleaved = [];
-  frames.forEach((frame, index) => {
-    if (index % 3 === 0) interleaved.push(helloFrame());
-    interleaved.push(frame);
-  });
   signalKind = kind;
-  signalFrames = interleaved;
+  signalFrames = frames;
   startSignalAnimation();
 }
 
@@ -730,8 +859,8 @@ function parseSignalFrame(raw) {
 async function createOpticalOffer() {
   if (!pairingActive || buildingSignal) return;
   buildingSignal = true;
-  setPairingCopy('2 · Preparing the offer', 'Roles chosen automatically',
-    'This phone is preparing the direct route. Keep the screens aligned.', 30);
+  setPairingCopy('2 · Preparing your code', 'Creating the first connection code',
+    'The other device should remain in camera mode.', 24);
   try {
     const connection = setupPeer('initiator');
     const offer = await connection.createOffer();
@@ -740,8 +869,13 @@ async function createOpticalOffer() {
     if (!pairingActive || peer !== connection) return;
     const frames = await buildSignalFrames('O', connection.localDescription);
     displaySignalFrames(frames, 'offer');
-    setPairingCopy('2 · Sending the offer', 'Keep the screens still',
-      'The other phone is collecting the light frames and will answer automatically.', 42);
+    setPairMode('offer');
+    ui.cameraState.dataset.state = 'active';
+    ui.cameraState.textContent = handoffAudioStream
+      ? 'Showing code · listening for three beeps'
+      : 'Showing code · use Scan answer now after the beeps';
+    setPairingCopy('2 · Show this code', 'Point the other camera here',
+      'After it reads the code, it will beep. This device will then open its camera automatically.', 36);
   } catch (error) {
     failPairing(error);
   } finally {
@@ -752,8 +886,8 @@ async function createOpticalOffer() {
 async function createOpticalAnswer(description) {
   if (!pairingActive || buildingSignal || peerRole !== 'responder') return;
   buildingSignal = true;
-  setPairingCopy('3 · Preparing the answer', 'Offer received',
-    'This phone is returning the final handshake through its screen.', 70);
+  setPairingCopy('3 · Preparing the answer', 'First code received',
+    'Keep the devices close. This device is preparing the return code.', 68);
   try {
     const connection = peer;
     await connection.setRemoteDescription(description);
@@ -762,14 +896,52 @@ async function createOpticalAnswer(description) {
     await waitForIceGathering(connection);
     if (!pairingActive || peer !== connection) return;
     const frames = await buildSignalFrames('A', connection.localDescription);
+    stopScanner();
     displaySignalFrames(frames, 'answer');
-    setPairingCopy('3 · Returning the answer', 'Almost connected',
-      'Keep the screens aligned until both phones confirm the direct channel.', 82);
+    setPairMode('answer');
+    ui.cameraState.dataset.state = 'active';
+    ui.cameraState.textContent = 'Answer ready · playing handoff beeps';
+    setPairingCopy('3 · Show the answer', 'Turn this code toward the first device',
+      'Three beeps tell the first device to open its camera. Hold this screen steady.', 82);
+    playHandoffBeeps().catch(() => {});
   } catch (error) {
     failPairing(error);
   } finally {
     buildingSignal = false;
   }
+}
+
+async function showConnectionCode() {
+  if (!pairingActive || peerRole || buildingSignal) return;
+  stopScanner();
+  pairingSession = randomHex(4);
+  pairingSessionNumber = Number.parseInt(pairingSession, 16) >>> 0;
+  peerRole = 'initiator';
+  setPairMode('preparing');
+  renderQr(`NCS0|${pairingSession}|PREPARING`);
+  ui.cameraState.dataset.state = 'starting';
+  ui.cameraState.textContent = 'Preparing code · requesting beep detection';
+  try {
+    await startHandoffListener();
+  } catch {
+    ui.cameraState.dataset.state = 'warning';
+    ui.cameraState.textContent = 'Beep detection unavailable · manual scan remains available';
+  }
+  await createOpticalOffer();
+}
+
+async function switchToAnswerScanner(manual = true) {
+  if (!pairingActive || peerRole !== 'initiator' || pairingMode !== 'offer') return;
+  handoffTriggered = true;
+  stopHandoffListener();
+  stopSignalAnimation();
+  setPairMode('scan');
+  resetCameraFeedback();
+  setPairingCopy('3 · Scan the answer', manual ? 'Open the answer scanner' : 'Handoff beeps received',
+    'Point this camera at the answer code now showing on the other device.', 72);
+  ui.cameraState.dataset.state = 'starting';
+  ui.cameraState.textContent = 'Starting main camera…';
+  await startMainCamera();
 }
 
 async function finishSignal(kind, bytes) {
@@ -781,16 +953,26 @@ async function finishSignal(kind, bytes) {
   }
   if (peerRole !== 'initiator' || !peer) return;
   setPairingCopy('4 · Opening the channel', 'Answer received',
-    'The optical handshake is complete. Opening WebRTC now…', 94);
+    'The QR handoff is complete. Opening WebRTC now…', 94);
+  stopScanner();
   stopSignalAnimation();
   await peer.setRemoteDescription(description);
   setConnectionStatus('pairing', 'Connecting', 'Opening the persistent data channel…');
 }
 
 async function ingestSignalFrame(raw) {
-  if (!pairingActive || !pairingSession || signalFinishing) return;
+  if (!pairingActive || signalFinishing) return;
   const parsed = parseSignalFrame(raw);
   if (!parsed) return;
+  if (!pairingSession) {
+    if (parsed.kind !== 'O' || peerRole) return;
+    pairingSessionNumber = parsed.frame.session >>> 0;
+    pairingSession = pairingSessionNumber.toString(16).padStart(8, '0');
+    setupPeer('responder');
+    setPairMode('scan');
+    setPairingCopy('2 · Reading the first code', 'Connection code found',
+      'Hold the camera steady while the complete offer is collected.', 30);
+  }
   const expectedKind = peerRole === 'initiator' ? 'A' : peerRole === 'responder' ? 'O' : '';
   if (!expectedKind || parsed.kind !== expectedKind || parsed.frame.session !== pairingSessionNumber) return;
 
@@ -826,39 +1008,8 @@ async function ingestSignalFrame(raw) {
   }
 }
 
-async function acceptHello(raw) {
-  const match = /^NCH1\|([0-9a-f]{16})$/.exec(raw);
-  if (!pairingActive || !match || match[1] === localHello || remoteHello) return;
-  remoteHello = match[1];
-  if (remoteHello === localHello) {
-    localHello = randomHex();
-    remoteHello = '';
-    displayHello();
-    return;
-  }
-
-  const ordered = [localHello, remoteHello].sort();
-  pairingSession = fnvHash(`${ordered[0]}:${ordered[1]}`);
-  pairingSessionNumber = Number.parseInt(pairingSession, 16) >>> 0;
-  navigator.vibrate?.(45);
-  resetSignalDecoder();
-
-  if (localHello === ordered[0]) {
-    peerRole = 'initiator';
-    await createOpticalOffer();
-  } else {
-    setupPeer('responder');
-    setPairingCopy('2 · Receiving the offer', 'The phones found each other',
-      'Keep the top edges aligned while this phone collects the offer.', 38);
-  }
-}
-
 async function consumeScannedValue(raw) {
   if (typeof raw !== 'string') return;
-  if (raw.startsWith(`${HELLO_PREFIX}|`)) {
-    await acceptHello(raw);
-    return;
-  }
   if (raw.startsWith(`${SIGNAL_FRAME_PREFIX}|`)) await ingestSignalFrame(raw);
 }
 
@@ -889,8 +1040,7 @@ function captureScannerFrame() {
 }
 
 function isNearChatOpticalFrame(value) {
-  return typeof value === 'string' &&
-    (value.startsWith(`${HELLO_PREFIX}|`) || value.startsWith(`${SIGNAL_FRAME_PREFIX}|`));
+  return typeof value === 'string' && value.startsWith(`${SIGNAL_FRAME_PREFIX}|`);
 }
 
 function barcodeCorners(result) {
@@ -922,15 +1072,15 @@ function resetCameraFeedback() {
   targetLastSeen = 0;
   lastDetectionFeedback = 0;
   ui.opticalStage.dataset.detected = 'false';
-  ui.alignmentScore.textContent = 'Looking for the other screen';
-  ui.alignmentHint.textContent = 'Put its QR code inside the centre frame.';
+  ui.alignmentScore.textContent = 'Looking for a NearChat code';
+  ui.alignmentHint.textContent = 'Point the main camera at the other screen.';
 }
 
 function markTargetLost() {
   if (performance.now() - targetLastSeen < 700) return;
   ui.opticalStage.dataset.detected = 'false';
   ui.alignmentScore.textContent = 'No QR code in view';
-  ui.alignmentHint.textContent = 'Move the other screen into the centre frame.';
+  ui.alignmentHint.textContent = 'Move the connection code into the centre frame.';
 }
 
 function positionDetectedOutline({ left, right, top, bottom }, frameWidth, frameHeight) {
@@ -942,8 +1092,7 @@ function positionDetectedOutline({ left, right, top, bottom }, frameWidth, frame
   const offsetX = (stage.width - renderedWidth) / 2;
   const offsetY = (stage.height - renderedHeight) / 2;
 
-  // The front-camera preview is mirrored, so reflect the detector's x coordinate.
-  ui.opticalStage.style.setProperty('--detected-left', `${offsetX + (frameWidth - right) * scale}px`);
+  ui.opticalStage.style.setProperty('--detected-left', `${offsetX + left * scale}px`);
   ui.opticalStage.style.setProperty('--detected-top', `${offsetY + top * scale}px`);
   ui.opticalStage.style.setProperty('--detected-width', `${(right - left) * scale}px`);
   ui.opticalStage.style.setProperty('--detected-height', `${(bottom - top) * scale}px`);
@@ -1020,14 +1169,14 @@ function scannerLoop(timestamp) {
   scannerBusy = false;
 }
 
-async function startFrontCamera() {
+async function startMainCamera() {
   stopScanner();
   ui.cameraState.dataset.state = 'starting';
-  ui.cameraState.textContent = 'Starting front camera…';
+  ui.cameraState.textContent = 'Starting main camera…';
   await chooseBarcodeDecoder();
   const stream = await navigator.mediaDevices.getUserMedia({
     video: {
-      facingMode: { ideal: 'user' },
+      facingMode: { ideal: 'environment' },
       width: { ideal: 1280 },
       height: { ideal: 720 },
       frameRate: { ideal: 24, max: 30 }
@@ -1045,7 +1194,7 @@ async function startFrontCamera() {
   scannerLastDecode = 0;
   scannerBusy = false;
   ui.cameraState.dataset.state = 'active';
-  ui.cameraState.textContent = 'Front camera active · scanning continuously';
+  ui.cameraState.textContent = 'Main camera active · scanning connection codes';
   scannerRaf = requestAnimationFrame(scannerLoop);
 }
 
@@ -1063,24 +1212,26 @@ function failPairing(error) {
   pairingActive = false;
   buildingSignal = false;
   stopScanner();
+  stopHandoffListener();
   stopSignalAnimation();
   resetSignalDecoder();
   teardownPeer({ keepMetrics: false });
   ui.cameraState.dataset.state = 'error';
   ui.cameraState.textContent = 'Pairing stopped';
-  setConnectionStatus('failed', 'Pairing unavailable', 'Press Share on both phones to try again.');
+  setConnectionStatus('failed', 'Pairing unavailable', 'Press Connect on both devices to try again.');
   setPairingCopy('Pairing stopped', 'The phones could not connect',
     error?.name === 'NotAllowedError'
-      ? 'Front-camera permission is required on both phones.'
-      : error?.message || 'Move the phones apart slightly and try again.', 8);
+      ? 'Camera permission is required to scan connection codes.'
+      : error?.message || 'Return to camera mode and try scanning the code again.', 8);
 }
 
 function resetPairingState() {
+  stopHandoffListener();
   resetSignalDecoder();
-  localHello = '';
-  remoteHello = '';
   pairingSession = '';
   pairingSessionNumber = 0;
+  pairingMode = 'scan';
+  handoffTriggered = false;
   signalKind = '';
   signalFrames = [];
   signalFrameIndex = 0;
@@ -1091,6 +1242,7 @@ function cancelPairDance() {
   const wasPairing = pairingActive;
   pairingActive = false;
   stopScanner();
+  stopHandoffListener();
   stopSignalAnimation();
   resetPairingState();
   if (wasPairing && !isConnected()) {
@@ -1102,22 +1254,23 @@ function cancelPairDance() {
 
 async function beginPairDance() {
   stopScanner();
+  stopHandoffListener();
   stopSignalAnimation();
   teardownPeer({ keepMetrics: false });
   resetPairingState();
   pairingActive = true;
-  localHello = randomHex();
   openPairing();
   setPairView('dance');
+  setPairMode('scan');
   resetCameraFeedback();
   ui.cameraState.dataset.state = 'starting';
-  ui.cameraState.textContent = 'Starting front camera…';
-  setPairingCopy('1 · Finding the other phone', 'Put both screens face to face',
-    'Use the live camera preview to keep the other screen centred while the QR stays visible.', 8);
-  displayHello();
-  setConnectionStatus('pairing', 'Pairing devices', 'Both front cameras are looking for the other screen.');
+  ui.cameraState.textContent = 'Starting main camera…';
+  setPairingCopy('1 · Scan or show', 'Scan a connection code',
+    'On one device only, tap Show connection code. Leave the other device in camera mode.', 8);
+  setConnectionStatus('pairing', 'Ready to pair', 'Scan the other screen or show a connection code.');
+  primeAudio().catch(() => {});
   try {
-    await Promise.all([ensureRaptor(), startFrontCamera()]);
+    await Promise.all([ensureRaptor(), startMainCamera()]);
   } catch (error) {
     if (pairingActive) failPairing(error);
   }
@@ -1446,6 +1599,16 @@ ui.overlay.addEventListener('click', event => {
   else closePairing();
 });
 ui.cancelPairing.addEventListener('click', cancelPairDance);
+ui.showCode.addEventListener('click', () => {
+  showConnectionCode().catch(error => {
+    if (pairingActive) failPairing(error);
+  });
+});
+ui.scanCode.addEventListener('click', () => {
+  switchToAnswerScanner(true).catch(error => {
+    if (pairingActive) failPairing(error);
+  });
+});
 ui.composer.addEventListener('submit', submitMessage);
 ui.input.addEventListener('input', updateComposer);
 ui.imageButton.addEventListener('click', () => ui.imageInput.click());
@@ -1466,11 +1629,13 @@ window.addEventListener('pageshow', () => {
 window.addEventListener('pagehide', () => {
   pairingActive = false;
   stopScanner();
+  stopHandoffListener();
   stopSignalAnimation();
   resetSignalDecoder();
   stopHeartbeat();
 });
 window.addEventListener('beforeunload', () => {
+  try { audioContext?.close(); } catch {}
   for (const url of objectUrls) URL.revokeObjectURL(url);
 });
 

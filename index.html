@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#08110f">
   <title>NearChat Direct</title>
-  <link rel="stylesheet" href="styles.css?v=2026.08.08.3">
+  <link rel="stylesheet" href="styles.css?v=2026.08.08.4">
 </head>
 <body>
   <main class="app" aria-label="NearChat Direct">
@@ -15,7 +15,7 @@
         <span class="brand-mark" aria-hidden="true"></span>
         <span>NearChat <small>Direct</small></span>
       </a>
-      <button class="share-button" id="shareButton" type="button">Share</button>
+      <button class="share-button" id="shareButton" type="button">Connect</button>
     </header>
 
     <section class="connection-bar" aria-label="Connection status">
@@ -39,7 +39,7 @@
       <div class="empty-state" id="emptyState">
         <span aria-hidden="true">↗</span>
         <h1>One direct chat.</h1>
-        <p>Put both devices on the same Wi-Fi or personal hotspot, press Share on both, then hold the screens face to face.</p>
+        <p>Press Connect on both devices. Scan the other screen or choose one device to show the first connection code.</p>
       </div>
     </section>
 
@@ -63,36 +63,36 @@
   <div class="overlay" id="pairingOverlay" hidden>
     <section class="pairing-sheet" role="dialog" aria-modal="true" aria-labelledby="pairingTitle">
       <header class="sheet-head">
-        <div><span class="sheet-kicker">Serverless pairing</span><h2 id="pairingTitle">Face the screens together</h2></div>
+        <div><span class="sheet-kicker">Direct pairing</span><h2 id="pairingTitle">Connect two devices</h2></div>
         <button class="close-button" id="closePairing" type="button" aria-label="Close pairing">×</button>
       </header>
 
       <div class="pair-view pair-dance" id="pairDance">
         <div class="optical-zone">
-          <div class="qr-stage">
-            <canvas id="pairQrCanvas" class="pair-qr-canvas" aria-label="Animated face-to-face pairing code"></canvas>
-          </div>
-          <span class="camera-state" id="cameraState">Starting front camera…</span>
-        </div>
-
-        <div class="pairing-lower">
           <div class="optical-stage" id="opticalStage" data-detected="false">
-            <video id="scannerVideo" class="camera-feed" playsinline muted autoplay></video>
-            <div class="camera-preview" aria-hidden="true">
-              <span class="preview-label">Camera view</span>
-              <span class="preview-reticle"></span>
-              <span class="detected-outline" id="detectedOutline"></span>
-              <div class="preview-feedback">
-                <strong id="alignmentScore">Looking for the other screen</strong>
-                <span id="alignmentHint">Put its QR code inside the centre frame.</span>
+            <div class="scan-stage" id="scanStage">
+              <video id="scannerVideo" class="camera-feed" playsinline muted autoplay></video>
+              <div class="camera-preview" aria-hidden="true">
+                <span class="preview-label">Main camera</span>
+                <span class="preview-reticle"></span>
+                <span class="detected-outline" id="detectedOutline"></span>
+                <div class="preview-feedback">
+                  <strong id="alignmentScore">Looking for a NearChat code</strong>
+                  <span id="alignmentHint">Point the camera at the other screen.</span>
+                </div>
               </div>
             </div>
+            <div class="qr-stage" id="qrStage" hidden>
+              <canvas id="pairQrCanvas" class="pair-qr-canvas" aria-label="Animated connection code"></canvas>
+            </div>
           </div>
-          <div class="dance-copy">
-            <span class="phase-pill" id="pairPhase">1 · Finding the other phone</span>
-            <strong id="pairStatusTitle">Put both screens face to face</strong>
-            <p id="pairStatus">Use the camera preview to keep the other screen centred while the QR stays visible.</p>
-          </div>
+          <span class="camera-state" id="cameraState">Starting main camera…</span>
+        </div>
+
+        <div class="dance-copy">
+          <span class="phase-pill" id="pairPhase">1 · Scan or show</span>
+          <strong id="pairStatusTitle">Scan a connection code</strong>
+          <p id="pairStatus">On one device only, tap Show connection code. Leave the other device in camera mode.</p>
         </div>
 
         <div class="dance-progress" aria-hidden="true">
@@ -100,7 +100,11 @@
         </div>
 
         <canvas id="scannerCanvas" hidden></canvas>
-        <button class="secondary cancel-pairing" id="cancelPairing" type="button">Cancel pairing</button>
+        <div class="pair-actions">
+          <button class="primary" id="showCode" type="button">Show connection code</button>
+          <button class="secondary" id="scanCode" type="button" hidden>Scan answer now</button>
+          <button class="secondary cancel-pairing" id="cancelPairing" type="button">Cancel</button>
+        </div>
       </div>
 
       <div class="pair-view connected-view" id="pairConnected" hidden>
@@ -113,6 +117,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=2026.08.08.3"></script>
+  <script type="module" src="app.js?v=2026.08.08.4"></script>
 </body>
 </html>
