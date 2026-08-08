@@ -5,6 +5,7 @@ const $ = selector => document.querySelector(selector);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+const DISCOVERY_FRAME_PREFIX = 'NCH1';
 const SIGNAL_FRAME_PREFIX = 'NCS1';
 const SIGNAL_FRAME_MS = 280;
 const HANDOFF_TONE_HZ = 1800;
@@ -26,6 +27,7 @@ const MEDIA_CHUNK_BYTES = 16 * 1024;
 const BUFFER_HIGH_WATER = 512 * 1024;
 const BUFFER_LOW_WATER = 128 * 1024;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+const MAX_PENDING_IMAGES = 20;
 const MAX_SCAN_PIXELS = 420000;
 
 const ui = {
@@ -60,6 +62,8 @@ const ui = {
   scanStage: $('#scanStage'),
   qrStage: $('#qrStage'),
   qrCanvas: $('#pairQrCanvas'),
+  discoveryCode: $('#discoveryCode'),
+  discoveryQrCanvas: $('#discoveryQrCanvas'),
   detectedOutline: $('#detectedOutline'),
   pairPhase: $('#pairPhase'),
   pairStatusTitle: $('#pairStatusTitle'),
@@ -102,8 +106,11 @@ let signalTimer = 0;
 let pairingActive = false;
 let pairingSession = '';
 let pairingSessionNumber = 0;
-let pairingMode = 'scan';
+let pairingMode = 'discover';
 let buildingSignal = false;
+let localDiscoveryId = '';
+let remoteDiscoveryId = '';
+let discoveryTimer = 0;
 let raptorReady = null;
 let signalDecoder = null;
 let signalDecodeKind = '';
@@ -133,10 +140,11 @@ let handoffOnsets = [];
 let handoffLastHit = 0;
 let handoffTriggered = false;
 let handoffOutputTimer = 0;
+let handoffListenPurpose = '';
+let handoffOutputPurpose = '';
 const handoffOscillators = new Set();
 
-let pendingImage = null;
-let pendingImageUrl = '';
+let pendingImages = [];
 let imageBusy = false;
 let incomingImage = null;
 let outboundMediaQueue = Promise.resolve();
@@ -162,11 +170,13 @@ function setPairView(view) {
 
 function setPairMode(mode) {
   pairingMode = mode;
-  ui.scanStage.hidden = mode !== 'scan';
-  ui.qrStage.hidden = mode === 'scan';
-  ui.showCode.hidden = mode !== 'scan' || peerRole !== null;
+  const cameraMode = mode === 'discover' || mode === 'scan';
+  ui.scanStage.hidden = !cameraMode;
+  ui.qrStage.hidden = cameraMode;
+  ui.discoveryCode.hidden = mode !== 'discover';
+  ui.showCode.hidden = (mode !== 'discover' && mode !== 'scan') || peerRole !== null;
   ui.scanCode.hidden = mode !== 'offer' || peerRole !== 'initiator';
-  if (mode !== 'scan') ui.opticalStage.dataset.detected = 'false';
+  if (!cameraMode) ui.opticalStage.dataset.detected = 'false';
 }
 
 function openPairing() {
@@ -219,6 +229,12 @@ function stopHandoffListener() {
   handoffOnFrames = 0;
   handoffOnsets = [];
   handoffLastHit = 0;
+  handoffListenPurpose = '';
+}
+
+function clearDiscoveryTimer() {
+  clearTimeout(discoveryTimer);
+  discoveryTimer = 0;
 }
 
 function measureHandoffFrequency() {
@@ -238,7 +254,11 @@ function measureHandoffFrequency() {
 function monitorHandoffTone() {
   if (!handoffAnalyser || !handoffAudioStream) return;
   handoffAudioRaf = requestAnimationFrame(monitorHandoffTone);
-  if (!pairingActive || pairingMode !== 'offer' || peerRole !== 'initiator') return;
+  const listeningForDiscovery = handoffListenPurpose === 'discovery' &&
+    pairingMode === 'discover' && peerRole === null;
+  const listeningForAnswer = handoffListenPurpose === 'answer' &&
+    pairingMode === 'offer' && peerRole === 'initiator';
+  if (!pairingActive || (!listeningForDiscovery && !listeningForAnswer)) return;
   handoffAnalyser.getFloatFrequencyData(handoffBins);
   const sample = measureHandoffFrequency();
   const toneOn = sample.score > HANDOFF_THRESHOLD_DB && sample.peak > HANDOFF_ABSOLUTE_MIN_DB;
@@ -258,7 +278,7 @@ function monitorHandoffTone() {
   if (handoffOnsets.length > HANDOFF_BEEP_COUNT)
     handoffOnsets = handoffOnsets.slice(-HANDOFF_BEEP_COUNT);
   ui.cameraState.dataset.state = 'warning';
-  ui.cameraState.textContent = `Handoff beeps heard · ${handoffOnsets.length} / ${HANDOFF_BEEP_COUNT}`;
+  ui.cameraState.textContent = `${listeningForDiscovery ? 'Discovery' : 'Handoff'} beeps heard · ${handoffOnsets.length} / ${HANDOFF_BEEP_COUNT}`;
   if (handoffOnsets.length !== HANDOFF_BEEP_COUNT || now - handoffLastHit <= 2000) return;
   const gaps = handoffOnsets.slice(1).map((onset, index) => onset - handoffOnsets[index]);
   if (!gaps.every(gap => gap > spacingMinimum && gap < spacingMaximum)) {
@@ -268,17 +288,23 @@ function monitorHandoffTone() {
   handoffLastHit = now;
   handoffTriggered = true;
   navigator.vibrate?.([45, 35, 80]);
-  switchToAnswerScanner(false).catch(error => {
+  const purpose = handoffListenPurpose;
+  stopHandoffListener();
+  const action = purpose === 'discovery'
+    ? showConnectionCode(true)
+    : switchToAnswerScanner(false);
+  action.catch(error => {
     if (pairingActive) failPairing(error);
   });
 }
 
-async function startHandoffListener() {
+async function startHandoffListener(purpose) {
   stopHandoffListener();
   handoffTriggered = false;
+  handoffListenPurpose = purpose;
   const context = await primeAudio();
   if (!context || !navigator.mediaDevices?.getUserMedia)
-    throw new Error('Audio handoff is unavailable. Use “Scan answer now”.');
+    throw new Error('Audio handoff is unavailable. Use the manual pairing controls.');
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
@@ -291,10 +317,22 @@ async function startHandoffListener() {
       video: false
     });
   } catch (error) {
-    if (error?.name === 'NotAllowedError') throw error;
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    if (error?.name === 'NotAllowedError') {
+      handoffListenPurpose = '';
+      throw error;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (fallbackError) {
+      handoffListenPurpose = '';
+      throw fallbackError;
+    }
   }
-  if (!pairingActive || peerRole !== 'initiator') {
+  const stillValid = pairingActive && handoffListenPurpose === purpose && (
+    (purpose === 'discovery' && pairingMode === 'discover' && peerRole === null) ||
+    (purpose === 'answer' && (pairingMode === 'preparing' || pairingMode === 'offer') && peerRole === 'initiator')
+  );
+  if (!stillValid) {
     stream.getTracks().forEach(track => track.stop());
     return;
   }
@@ -317,14 +355,20 @@ function stopHandoffBeeps() {
     try { oscillator.stop(); } catch {}
   }
   handoffOscillators.clear();
+  handoffOutputPurpose = '';
 }
 
-async function playHandoffBeeps() {
+async function playHandoffBeeps(purpose) {
   stopHandoffBeeps();
   const context = await primeAudio();
   if (!context) return false;
+  handoffOutputPurpose = purpose;
   const playSequence = () => {
-    if (!pairingActive || pairingMode !== 'answer' || peerRole !== 'responder') return;
+    const validDiscovery = purpose === 'discovery' && handoffOutputPurpose === purpose &&
+      pairingMode === 'scan' && peerRole === null;
+    const validAnswer = purpose === 'answer' && handoffOutputPurpose === purpose &&
+      pairingMode === 'answer' && peerRole === 'responder';
+    if (!pairingActive || (!validDiscovery && !validAnswer)) return;
     const startAt = context.currentTime + .06;
     const spacing = (HANDOFF_BEEP_MS + HANDOFF_GAP_MS) / 1000;
     for (let index = 0; index < HANDOFF_BEEP_COUNT; index++) {
@@ -369,7 +413,7 @@ function updateComposer() {
   ui.input.disabled = !connected;
   ui.input.placeholder = connected ? 'Message' : 'Connect to start chatting';
   ui.imageButton.disabled = !connected || !channelIsOpen(mediaChannel) || imageBusy;
-  ui.send.disabled = !connected || imageBusy || (!ui.input.value.trim() && !pendingImage);
+  ui.send.disabled = !connected || imageBusy || (!ui.input.value.trim() && pendingImages.length === 0);
 }
 
 function formatBytes(bytes) {
@@ -509,6 +553,7 @@ function setConnectedUi() {
   lastPongAt = Date.now();
   pairingActive = false;
   buildingSignal = false;
+  clearDiscoveryTimer();
   stopScanner();
   stopHandoffListener();
   stopHandoffBeeps();
@@ -641,6 +686,7 @@ function disconnectPeer() {
   stopScanner();
   stopHandoffListener();
   stopHandoffBeeps();
+  clearDiscoveryTimer();
   resetSignalDecoder();
   pairingActive = false;
   buildingSignal = false;
@@ -812,17 +858,19 @@ async function buildSignalFrames(kind, description) {
   }))}`);
 }
 
-function renderQr(text) {
+function renderQr(text, canvas = ui.qrCanvas) {
   const qr = QRCode.create([{ data: text, mode: 'byte' }], { errorCorrectionLevel: 'L' });
   const quiet = 4;
   const modules = qr.modules.size;
   const dimension = modules + quiet * 2;
-  const target = Math.min(660, Math.max(300, Math.round((window.devicePixelRatio || 1) * 330)));
+  const size = canvas === ui.discoveryQrCanvas ? 150 : 330;
+  const maximum = canvas === ui.discoveryQrCanvas ? 300 : 660;
+  const target = Math.min(maximum, Math.max(size, Math.round((window.devicePixelRatio || 1) * size)));
   const scale = Math.max(2, Math.floor(target / dimension));
   const pixels = dimension * scale;
-  const context = ui.qrCanvas.getContext('2d');
-  ui.qrCanvas.width = pixels;
-  ui.qrCanvas.height = pixels;
+  const context = canvas.getContext('2d');
+  canvas.width = pixels;
+  canvas.height = pixels;
   context.fillStyle = '#ffffff';
   context.fillRect(0, 0, pixels, pixels);
   context.fillStyle = '#153f33';
@@ -895,6 +943,41 @@ function parseSignalFrame(raw) {
   return frame ? { kind: match[1], frame } : null;
 }
 
+function parseDiscoveryFrame(raw) {
+  const match = typeof raw === 'string' ? /^NCH1\|([0-9a-f]{16})$/.exec(raw) : null;
+  return match?.[1] || '';
+}
+
+async function becomeDiscoveryScanner() {
+  if (!pairingActive || pairingMode !== 'discover' || peerRole || !remoteDiscoveryId) return;
+  clearDiscoveryTimer();
+  stopHandoffListener();
+  setPairMode('scan');
+  setPairingCopy('1 · Device found', 'Keep the other QR in view',
+    'Sending three beeps so the other device knows to show its connection code.', 18);
+  ui.cameraState.dataset.state = 'active';
+  ui.cameraState.textContent = 'Other device found · requesting its connection code';
+  await playHandoffBeeps('discovery');
+}
+
+function handleDiscoveryFrame(raw) {
+  if (!pairingActive || pairingMode !== 'discover' || peerRole) return;
+  const remoteId = parseDiscoveryFrame(raw);
+  if (!remoteId || remoteId === localDiscoveryId || remoteDiscoveryId) return;
+  remoteDiscoveryId = remoteId;
+  clearDiscoveryTimer();
+  ui.alignmentScore.textContent = 'Nearby device found';
+  ui.alignmentHint.textContent = 'Hold both devices steady while NearChat chooses who shares first.';
+  setPairingCopy('1 · Device found', 'Choosing the first sharing device',
+    'Keep both screens visible. The three-beep handoff starts automatically.', 14);
+  const preferredScanner = localDiscoveryId < remoteDiscoveryId;
+  discoveryTimer = window.setTimeout(() => {
+    becomeDiscoveryScanner().catch(error => {
+      if (pairingActive) failPairing(error);
+    });
+  }, preferredScanner ? 140 : 1500);
+}
+
 async function createOpticalOffer() {
   if (!pairingActive || buildingSignal) return;
   buildingSignal = true;
@@ -942,7 +1025,7 @@ async function createOpticalAnswer(description) {
     ui.cameraState.textContent = 'Answer ready · playing handoff beeps';
     setPairingCopy('3 · Show the answer', 'Turn this code toward the first device',
       'Three beeps tell the first device to open its camera. Hold this screen steady.', 82);
-    playHandoffBeeps().catch(() => {});
+    playHandoffBeeps('answer').catch(() => {});
   } catch (error) {
     failPairing(error);
   } finally {
@@ -950,8 +1033,11 @@ async function createOpticalAnswer(description) {
   }
 }
 
-async function showConnectionCode() {
+async function showConnectionCode(automatic = false) {
   if (!pairingActive || peerRole || buildingSignal) return;
+  clearDiscoveryTimer();
+  stopHandoffBeeps();
+  stopHandoffListener();
   stopScanner();
   pairingSession = randomHex(4);
   pairingSessionNumber = Number.parseInt(pairingSession, 16) >>> 0;
@@ -961,10 +1047,14 @@ async function showConnectionCode() {
   ui.cameraState.dataset.state = 'starting';
   ui.cameraState.textContent = 'Preparing code · requesting beep detection';
   try {
-    await startHandoffListener();
+    await startHandoffListener('answer');
   } catch {
     ui.cameraState.dataset.state = 'warning';
     ui.cameraState.textContent = 'Beep detection unavailable · manual scan remains available';
+  }
+  if (automatic) {
+    setPairingCopy('2 · Preparing your code', 'Three discovery beeps received',
+      'This device was chosen to share the first connection code.', 24);
   }
   await createOpticalOffer();
 }
@@ -1005,6 +1095,9 @@ async function ingestSignalFrame(raw) {
   if (!parsed) return;
   if (!pairingSession) {
     if (parsed.kind !== 'O' || peerRole) return;
+    clearDiscoveryTimer();
+    stopHandoffListener();
+    stopHandoffBeeps();
     pairingSessionNumber = parsed.frame.session >>> 0;
     pairingSession = pairingSessionNumber.toString(16).padStart(8, '0');
     setupPeer('responder');
@@ -1049,6 +1142,10 @@ async function ingestSignalFrame(raw) {
 
 async function consumeScannedValue(raw) {
   if (typeof raw !== 'string') return;
+  if (raw.startsWith(`${DISCOVERY_FRAME_PREFIX}|`)) {
+    handleDiscoveryFrame(raw);
+    return;
+  }
   if (raw.startsWith(`${SIGNAL_FRAME_PREFIX}|`)) await ingestSignalFrame(raw);
 }
 
@@ -1079,7 +1176,10 @@ function captureScannerFrame() {
 }
 
 function isNearChatOpticalFrame(value) {
-  return typeof value === 'string' && value.startsWith(`${SIGNAL_FRAME_PREFIX}|`);
+  return typeof value === 'string' && (
+    value.startsWith(`${DISCOVERY_FRAME_PREFIX}|`) ||
+    value.startsWith(`${SIGNAL_FRAME_PREFIX}|`)
+  );
 }
 
 function barcodeCorners(result) {
@@ -1253,6 +1353,7 @@ function failPairing(error) {
   stopScanner();
   stopHandoffListener();
   stopHandoffBeeps();
+  clearDiscoveryTimer();
   stopSignalAnimation();
   resetSignalDecoder();
   teardownPeer({ keepMetrics: false });
@@ -1268,10 +1369,13 @@ function failPairing(error) {
 function resetPairingState() {
   stopHandoffListener();
   stopHandoffBeeps();
+  clearDiscoveryTimer();
   resetSignalDecoder();
   pairingSession = '';
   pairingSessionNumber = 0;
-  pairingMode = 'scan';
+  pairingMode = 'discover';
+  localDiscoveryId = '';
+  remoteDiscoveryId = '';
   handoffTriggered = false;
   signalKind = '';
   signalFrames = [];
@@ -1302,20 +1406,32 @@ async function beginPairDance() {
   teardownPeer({ keepMetrics: false });
   resetPairingState();
   pairingActive = true;
+  localDiscoveryId = randomHex(8);
   openPairing();
   setPairView('dance');
-  setPairMode('scan');
+  setPairMode('discover');
+  renderQr(`${DISCOVERY_FRAME_PREFIX}|${localDiscoveryId}`, ui.discoveryQrCanvas);
   resetCameraFeedback();
   ui.cameraState.dataset.state = 'starting';
   ui.cameraState.textContent = 'Starting main camera…';
-  setPairingCopy('1 · Scan or show', 'Scan a connection code',
-    'On one device only, tap Show connection code. Leave the other device in camera mode.', 8);
-  setConnectionStatus('pairing', 'Ready to pair', 'Scan the other screen or show a connection code.');
+  setPairingCopy('1 · Find the other device', 'Point the cameras at the other screen',
+    'Each camera looks for the small QR in the corner. NearChat then chooses who shares first.', 8);
+  setConnectionStatus('pairing', 'Finding nearby device', 'Keep the other screen inside the camera view.');
   primeAudio().catch(() => {});
   try {
     await Promise.all([ensureRaptor(), startMainCamera()]);
   } catch (error) {
     if (pairingActive) failPairing(error);
+    return;
+  }
+  if (!pairingActive || pairingMode !== 'discover') return;
+  try {
+    await startHandoffListener('discovery');
+  } catch {
+    if (!pairingActive) return;
+    ui.cameraState.dataset.state = 'warning';
+    ui.cameraState.textContent = 'Automatic beeps unavailable · manual Show remains available';
+    ui.pairStatus.textContent = 'Automatic audio handoff is unavailable. Tap Show connection code on one device.';
   }
 }
 
@@ -1548,32 +1664,52 @@ async function prepareImage(file) {
   }
 }
 
-function clearPendingImage() {
-  pendingImage = null;
+function clearPendingImages() {
+  for (const item of pendingImages) URL.revokeObjectURL(item.url);
+  pendingImages = [];
   ui.imageInput.value = '';
   ui.imageDraft.hidden = true;
   ui.imageDraftPreview.removeAttribute('src');
-  if (pendingImageUrl) URL.revokeObjectURL(pendingImageUrl);
-  pendingImageUrl = '';
   updateComposer();
 }
 
-async function selectImage(file) {
+async function selectImages(files) {
+  const requestedCount = files.length;
+  const selected = Array.from(files)
+    .filter(file => file instanceof File && file.type.startsWith('image/'))
+    .slice(0, MAX_PENDING_IMAGES);
+  if (!selected.length) return;
   imageBusy = true;
   ui.imageButton.disabled = true;
-  showToast('Preparing image…');
+  clearPendingImages();
+  showToast(`Preparing ${selected.length === 1 ? 'image' : `${selected.length} images`}…`);
+  let skipped = 0;
   try {
-    const image = await prepareImage(file);
-    clearPendingImage();
-    pendingImage = image;
-    pendingImageUrl = URL.createObjectURL(image.blob);
-    ui.imageDraftPreview.src = pendingImageUrl;
-    ui.imageDraftName.textContent = image.name || 'Image ready';
-    ui.imageDraftSize.textContent = `${image.width} × ${image.height} · ${formatBytes(image.blob.size)}`;
+    for (const file of selected) {
+      try {
+        const image = await prepareImage(file);
+        pendingImages.push({ image, url: URL.createObjectURL(image.blob) });
+      } catch {
+        skipped++;
+      }
+    }
+    if (!pendingImages.length) throw new Error('The selected images could not be prepared.');
+    const first = pendingImages[0];
+    const totalBytes = pendingImages.reduce((total, item) => total + item.image.blob.size, 0);
+    ui.imageDraftPreview.src = first.url;
+    ui.imageDraftName.textContent = pendingImages.length === 1
+      ? first.image.name || 'Image ready'
+      : `${pendingImages.length} images ready`;
+    ui.imageDraftSize.textContent = pendingImages.length === 1
+      ? `${first.image.width} × ${first.image.height} · ${formatBytes(totalBytes)}`
+      : `${formatBytes(totalBytes)} total${skipped ? ` · ${skipped} skipped` : ''}`;
     ui.imageDraft.hidden = false;
+    if (selected.length === MAX_PENDING_IMAGES && requestedCount > MAX_PENDING_IMAGES)
+      showToast(`The first ${MAX_PENDING_IMAGES} images were selected.`);
+    else if (skipped) showToast(`${skipped} image${skipped === 1 ? '' : 's'} could not be prepared.`);
   } catch (error) {
-    clearPendingImage();
-    showToast(error.message || 'The image could not be prepared.');
+    clearPendingImages();
+    showToast(error.message || 'The images could not be prepared.');
   } finally {
     imageBusy = false;
     updateComposer();
@@ -1587,17 +1723,16 @@ async function submitMessage(event) {
     return;
   }
   const text = ui.input.value.trim();
-  const image = pendingImage;
-  const imageUrl = pendingImageUrl;
-  if (!text && !image) return;
+  const images = pendingImages;
+  if (!text && images.length === 0) return;
   ui.input.value = '';
-  pendingImage = null;
-  pendingImageUrl = '';
+  pendingImages = [];
   ui.imageDraft.hidden = true;
+  ui.imageDraftPreview.removeAttribute('src');
   ui.imageInput.value = '';
   updateComposer();
 
-  if (!image) {
+  if (!images.length) {
     const view = appendTextMessage({ mine: true, text, state: 'sending' });
     try {
       sendChatPacket({ type: 'message', id: randomId(), timestamp: Date.now(), text });
@@ -1609,13 +1744,16 @@ async function submitMessage(event) {
     return;
   }
 
-  objectUrls.add(imageUrl);
-  const view = appendImageMessage({ mine: true, url: imageUrl, text, state: 'queued' });
-  const task = outboundMediaQueue.then(() => transferImage(image, text, view));
-  outboundMediaQueue = task.catch(() => {});
-  task.catch(error => {
-    view.stateNode.textContent = 'failed';
-    showToast(error.message || 'The image could not be sent.');
+  images.forEach(({ image, url }, index) => {
+    objectUrls.add(url);
+    const caption = index === 0 ? text : '';
+    const view = appendImageMessage({ mine: true, url, text: caption, state: 'queued' });
+    const task = outboundMediaQueue.then(() => transferImage(image, caption, view));
+    outboundMediaQueue = task.catch(() => {});
+    task.catch(error => {
+      view.stateNode.textContent = 'failed';
+      showToast(error.message || 'An image could not be sent.');
+    });
   });
 }
 
@@ -1656,10 +1794,10 @@ ui.composer.addEventListener('submit', submitMessage);
 ui.input.addEventListener('input', updateComposer);
 ui.imageButton.addEventListener('click', () => ui.imageInput.click());
 ui.imageInput.addEventListener('change', () => {
-  const file = ui.imageInput.files?.[0];
-  if (file) selectImage(file);
+  const files = ui.imageInput.files;
+  if (files?.length) selectImages(files);
 });
-ui.removeImage.addEventListener('click', clearPendingImage);
+ui.removeImage.addEventListener('click', clearPendingImages);
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && isConnected()) {
@@ -1671,6 +1809,7 @@ window.addEventListener('pageshow', () => {
 });
 window.addEventListener('pagehide', () => {
   pairingActive = false;
+  clearDiscoveryTimer();
   stopScanner();
   stopHandoffListener();
   stopHandoffBeeps();

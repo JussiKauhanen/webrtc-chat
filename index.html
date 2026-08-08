@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#08110f">
   <title>NearChat Direct</title>
-  <link rel="stylesheet" href="styles.css?v=2026.08.08.5">
+  <link rel="stylesheet" href="styles.css?v=2026.08.08.6">
 </head>
 <body>
   <main class="app" aria-label="NearChat Direct">
@@ -39,7 +39,7 @@
       <div class="empty-state" id="emptyState">
         <span aria-hidden="true">↗</span>
         <h1>One direct chat.</h1>
-        <p>Press Connect on both devices. Scan the other screen or choose one device to show the first connection code.</p>
+        <p>Press Connect on both devices and point the cameras at the other screen. NearChat chooses who shares the first code.</p>
       </div>
     </section>
 
@@ -50,8 +50,8 @@
         <button id="removeImage" type="button" aria-label="Remove selected image">×</button>
       </div>
       <div class="composer-row">
-        <button class="image-button" id="imageButton" type="button" aria-label="Choose an image">＋</button>
-        <input id="imageInput" type="file" accept="image/*" hidden>
+        <button class="image-button" id="imageButton" type="button" aria-label="Choose images">＋</button>
+        <input id="imageInput" type="file" accept="image/*" multiple hidden>
         <input class="message-input" id="messageInput" type="text" maxlength="2000"
                autocomplete="off" enterkeyhint="send" placeholder="Connect to start chatting"
                aria-label="Message" disabled>
@@ -72,6 +72,10 @@
           <div class="optical-stage" id="opticalStage" data-detected="false">
             <div class="scan-stage" id="scanStage">
               <video id="scannerVideo" class="camera-feed" playsinline muted autoplay></video>
+              <div class="discovery-code" id="discoveryCode">
+                <span>Nearby code</span>
+                <canvas id="discoveryQrCanvas" aria-label="Nearby device discovery code"></canvas>
+              </div>
               <div class="camera-preview" aria-hidden="true">
                 <span class="preview-label">Main camera</span>
                 <span class="preview-reticle"></span>
@@ -90,9 +94,9 @@
         </div>
 
         <div class="dance-copy">
-          <span class="phase-pill" id="pairPhase">1 · Scan or show</span>
-          <strong id="pairStatusTitle">Scan a connection code</strong>
-          <p id="pairStatus">On one device only, tap Show connection code. Leave the other device in camera mode.</p>
+          <span class="phase-pill" id="pairPhase">1 · Find the other device</span>
+          <strong id="pairStatusTitle">Point the cameras at the other screen</strong>
+          <p id="pairStatus">The small QR codes choose which device shares first. Show connection code remains available as a fallback.</p>
         </div>
 
         <div class="dance-progress" aria-hidden="true">
@@ -117,6 +121,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=2026.08.08.5"></script>
+  <script type="module" src="app.js?v=2026.08.08.6"></script>
 </body>
 </html>
