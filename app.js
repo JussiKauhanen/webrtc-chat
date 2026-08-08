@@ -8,9 +8,6 @@ const decoder = new TextDecoder();
 const HELLO_PREFIX = 'NCH1';
 const SIGNAL_FRAME_PREFIX = 'NCS1';
 const SIGNAL_FRAME_MS = 280;
-const QR_VIEW_MS = 900;
-const CAMERA_VIEW_MS = 300;
-const LOCKED_QR_VIEW_MS = 2400;
 const RAPTOR_TRANSPORT_BYTES = 260;
 const RAPTOR_REPAIR_PERCENT = 300;
 const RAPTOR_FRAME_MAGIC = new Uint8Array([0x4e, 0x43, 0x53, 0x31]); // NCS1
@@ -113,7 +110,6 @@ let scannerBusy = false;
 let scannerLastDecode = 0;
 let barcodeDetector = null;
 let targetLastSeen = 0;
-let opticalViewTimer = 0;
 let lastDetectionFeedback = 0;
 
 let pendingImage = null;
@@ -694,36 +690,6 @@ function displaySignalFrames(frames, kind) {
   startSignalAnimation();
 }
 
-function setOpticalView(view) {
-  ui.opticalStage.dataset.view = view;
-}
-
-function stopOpticalViewCycle() {
-  clearTimeout(opticalViewTimer);
-  opticalViewTimer = 0;
-  setOpticalView('qr');
-}
-
-function showQrView() {
-  if (!pairingActive || !cameraStream) return;
-  setOpticalView('qr');
-  const recentlyDetected = performance.now() - targetLastSeen < 1500;
-  opticalViewTimer = window.setTimeout(showCameraView,
-    recentlyDetected ? LOCKED_QR_VIEW_MS : QR_VIEW_MS);
-}
-
-function showCameraView() {
-  if (!pairingActive || !cameraStream) return;
-  setOpticalView('camera');
-  opticalViewTimer = window.setTimeout(showQrView, CAMERA_VIEW_MS);
-}
-
-function startOpticalViewCycle() {
-  stopOpticalViewCycle();
-  setOpticalView('camera');
-  opticalViewTimer = window.setTimeout(showQrView, CAMERA_VIEW_MS);
-}
-
 function waitForIceGathering(connection, timeout = 5000) {
   if (connection.iceGatheringState === 'complete') return Promise.resolve();
   return new Promise(resolve => {
@@ -1080,12 +1046,10 @@ async function startFrontCamera() {
   scannerBusy = false;
   ui.cameraState.dataset.state = 'active';
   ui.cameraState.textContent = 'Front camera active · scanning continuously';
-  startOpticalViewCycle();
   scannerRaf = requestAnimationFrame(scannerLoop);
 }
 
 function stopScanner() {
-  stopOpticalViewCycle();
   scannerGeneration++;
   cancelAnimationFrame(scannerRaf);
   scannerRaf = 0;
@@ -1149,7 +1113,7 @@ async function beginPairDance() {
   ui.cameraState.dataset.state = 'starting';
   ui.cameraState.textContent = 'Starting front camera…';
   setPairingCopy('1 · Finding the other phone', 'Put both screens face to face',
-    'The live camera view will flash between QR frames so you can line up the other screen.', 8);
+    'Use the live camera preview to keep the other screen centred while the QR stays visible.', 8);
   displayHello();
   setConnectionStatus('pairing', 'Pairing devices', 'Both front cameras are looking for the other screen.');
   try {
