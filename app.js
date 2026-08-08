@@ -7,9 +7,13 @@ const decoder = new TextDecoder();
 
 const SIGNAL_FRAME_PREFIX = 'NCS1';
 const SIGNAL_FRAME_MS = 280;
-const HANDOFF_TONE_HZ = 2300;
+const HANDOFF_TONE_HZ = 1800;
 const HANDOFF_BEEP_MS = 150;
-const HANDOFF_GAP_MS = 110;
+const HANDOFF_GAP_MS = 130;
+const HANDOFF_BEEP_COUNT = 3;
+const HANDOFF_PERIOD_MS = 3000;
+const HANDOFF_THRESHOLD_DB = 16;
+const HANDOFF_ABSOLUTE_MIN_DB = -85;
 const RAPTOR_TRANSPORT_BYTES = 260;
 const RAPTOR_REPAIR_PERCENT = 300;
 const RAPTOR_FRAME_MAGIC = new Uint8Array([0x4e, 0x43, 0x53, 0x31]); // NCS1
@@ -122,11 +126,14 @@ let handoffAudioStream = null;
 let handoffAudioSource = null;
 let handoffAnalyser = null;
 let handoffAudioRaf = 0;
-let handoffToneActive = false;
-let handoffToneStarted = 0;
-let handoffBurstCount = 0;
-let handoffLastBurst = 0;
+let handoffBins = null;
+let handoffTargetBin = 0;
+let handoffOnFrames = 0;
+let handoffOnsets = [];
+let handoffLastHit = 0;
 let handoffTriggered = false;
+let handoffOutputTimer = 0;
+const handoffOscillators = new Set();
 
 let pendingImage = null;
 let pendingImageUrl = '';
@@ -205,67 +212,65 @@ function stopHandoffListener() {
   try { handoffAudioSource?.disconnect(); } catch {}
   handoffAudioSource = null;
   handoffAnalyser = null;
+  handoffBins = null;
+  handoffTargetBin = 0;
   handoffAudioStream?.getTracks().forEach(track => track.stop());
   handoffAudioStream = null;
-  handoffToneActive = false;
-  handoffToneStarted = 0;
-  handoffBurstCount = 0;
-  handoffLastBurst = 0;
+  handoffOnFrames = 0;
+  handoffOnsets = [];
+  handoffLastHit = 0;
+}
+
+function measureHandoffFrequency() {
+  let peak = -Infinity;
+  for (let index = handoffTargetBin - 1; index <= handoffTargetBin + 1; index++)
+    peak = Math.max(peak, handoffBins[index]);
+  const nearby = [];
+  for (let index = Math.max(0, handoffTargetBin - 60);
+      index <= Math.min(handoffBins.length - 1, handoffTargetBin + 60); index++)
+    if (Math.abs(index - handoffTargetBin) > 4 && Number.isFinite(handoffBins[index]))
+      nearby.push(handoffBins[index]);
+  nearby.sort((a, b) => a - b);
+  const floor = nearby.length ? nearby[nearby.length >> 1] : -120;
+  return { peak, floor, score: Number.isFinite(peak) ? peak - floor : 0 };
 }
 
 function monitorHandoffTone() {
   if (!handoffAnalyser || !handoffAudioStream) return;
   handoffAudioRaf = requestAnimationFrame(monitorHandoffTone);
-  const levels = new Uint8Array(handoffAnalyser.frequencyBinCount);
-  handoffAnalyser.getByteFrequencyData(levels);
-  const binWidth = audioContext.sampleRate / handoffAnalyser.fftSize;
-  const targetBin = Math.round(HANDOFF_TONE_HZ / binWidth);
-  let targetLevel = 0;
-  for (let offset = -2; offset <= 2; offset++)
-    targetLevel = Math.max(targetLevel, levels[targetBin + offset] || 0);
-  let noiseTotal = 0;
-  let noiseSamples = 0;
-  for (let index = 8; index < Math.min(levels.length, 180); index += 4) {
-    if (Math.abs(index - targetBin) <= 4) continue;
-    noiseTotal += levels[index];
-    noiseSamples++;
+  if (!pairingActive || pairingMode !== 'offer' || peerRole !== 'initiator') return;
+  handoffAnalyser.getFloatFrequencyData(handoffBins);
+  const sample = measureHandoffFrequency();
+  const toneOn = sample.score > HANDOFF_THRESHOLD_DB && sample.peak > HANDOFF_ABSOLUTE_MIN_DB;
+  if (!toneOn) {
+    handoffOnFrames = 0;
+    return;
   }
-  const noiseFloor = noiseSamples ? noiseTotal / noiseSamples : 0;
-  const tonePresent = targetLevel > 145 && targetLevel > noiseFloor + 52;
+  handoffOnFrames++;
+  if (handoffOnFrames !== 2) return;
   const now = performance.now();
-
-  if (tonePresent && !handoffToneActive) {
-    handoffToneActive = true;
-    handoffToneStarted = now;
+  handoffOnsets.push(now);
+  const spacing = HANDOFF_BEEP_MS + HANDOFF_GAP_MS;
+  const spacingMinimum = spacing * .5;
+  const spacingMaximum = spacing * 2;
+  if (handoffOnsets.length > 1 && now - handoffOnsets.at(-2) > spacingMaximum * 1.6)
+    handoffOnsets = [now];
+  if (handoffOnsets.length > HANDOFF_BEEP_COUNT)
+    handoffOnsets = handoffOnsets.slice(-HANDOFF_BEEP_COUNT);
+  ui.cameraState.dataset.state = 'warning';
+  ui.cameraState.textContent = `Handoff beeps heard · ${handoffOnsets.length} / ${HANDOFF_BEEP_COUNT}`;
+  if (handoffOnsets.length !== HANDOFF_BEEP_COUNT || now - handoffLastHit <= 2000) return;
+  const gaps = handoffOnsets.slice(1).map((onset, index) => onset - handoffOnsets[index]);
+  if (!gaps.every(gap => gap > spacingMinimum && gap < spacingMaximum)) {
+    handoffOnsets = [now];
     return;
   }
-  if (tonePresent && handoffToneActive) {
-    if (now - handoffToneStarted > 450) {
-      handoffToneActive = false;
-      handoffBurstCount = 0;
-    }
-    return;
-  }
-  if (!tonePresent && handoffToneActive) {
-    const duration = now - handoffToneStarted;
-    handoffToneActive = false;
-    if (duration >= 70 && duration <= 360) {
-      const sincePrevious = handoffLastBurst ? now - handoffLastBurst : 0;
-      if (!sincePrevious || sincePrevious >= 120) {
-        handoffBurstCount = sincePrevious && sincePrevious < 650
-          ? handoffBurstCount + 1 : 1;
-        handoffLastBurst = now;
-      }
-      if (handoffBurstCount >= 3 && !handoffTriggered) {
-        handoffTriggered = true;
-        navigator.vibrate?.([45, 35, 80]);
-        switchToAnswerScanner(false).catch(error => {
-          if (pairingActive) failPairing(error);
-        });
-      }
-    }
-  }
-  if (handoffLastBurst && now - handoffLastBurst > 900) handoffBurstCount = 0;
+  handoffLastHit = now;
+  handoffTriggered = true;
+  navigator.vibrate?.([45, 35, 80]);
+  switchToAnswerScanner(false).catch(error => {
+    if (pairingActive) failPairing(error);
+  });
 }
 
 async function startHandoffListener() {
@@ -274,10 +279,21 @@ async function startHandoffListener() {
   const context = await primeAudio();
   if (!context || !navigator.mediaDevices?.getUserMedia)
     throw new Error('Audio handoff is unavailable. Use “Scan answer now”.');
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    video: false
-  });
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: 1
+      },
+      video: false
+    });
+  } catch (error) {
+    if (error?.name === 'NotAllowedError') throw error;
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  }
   if (!pairingActive || peerRole !== 'initiator') {
     stream.getTracks().forEach(track => track.stop());
     return;
@@ -285,31 +301,52 @@ async function startHandoffListener() {
   handoffAudioStream = stream;
   handoffAudioSource = context.createMediaStreamSource(stream);
   handoffAnalyser = context.createAnalyser();
-  handoffAnalyser.fftSize = 2048;
-  handoffAnalyser.smoothingTimeConstant = .2;
+  handoffAnalyser.fftSize = 4096;
+  handoffAnalyser.smoothingTimeConstant = 0;
+  handoffBins = new Float32Array(handoffAnalyser.frequencyBinCount);
+  handoffTargetBin = Math.round(HANDOFF_TONE_HZ /
+    (context.sampleRate / handoffAnalyser.fftSize));
   handoffAudioSource.connect(handoffAnalyser);
   handoffAudioRaf = requestAnimationFrame(monitorHandoffTone);
 }
 
+function stopHandoffBeeps() {
+  clearInterval(handoffOutputTimer);
+  handoffOutputTimer = 0;
+  for (const oscillator of handoffOscillators) {
+    try { oscillator.stop(); } catch {}
+  }
+  handoffOscillators.clear();
+}
+
 async function playHandoffBeeps() {
+  stopHandoffBeeps();
   const context = await primeAudio();
   if (!context) return false;
-  const startAt = context.currentTime + .08;
-  for (let index = 0; index < 3; index++) {
-    const toneStart = startAt + index * (HANDOFF_BEEP_MS + HANDOFF_GAP_MS) / 1000;
-    const toneEnd = toneStart + HANDOFF_BEEP_MS / 1000;
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(HANDOFF_TONE_HZ, toneStart);
-    gain.gain.setValueAtTime(.0001, toneStart);
-    gain.gain.exponentialRampToValueAtTime(.34, toneStart + .012);
-    gain.gain.setValueAtTime(.34, Math.max(toneStart + .013, toneEnd - .018));
-    gain.gain.exponentialRampToValueAtTime(.0001, toneEnd);
-    oscillator.connect(gain).connect(context.destination);
-    oscillator.start(toneStart);
-    oscillator.stop(toneEnd + .02);
-  }
+  const playSequence = () => {
+    if (!pairingActive || pairingMode !== 'answer' || peerRole !== 'responder') return;
+    const startAt = context.currentTime + .06;
+    const spacing = (HANDOFF_BEEP_MS + HANDOFF_GAP_MS) / 1000;
+    for (let index = 0; index < HANDOFF_BEEP_COUNT; index++) {
+      const toneStart = startAt + index * spacing;
+      const toneEnd = toneStart + HANDOFF_BEEP_MS / 1000;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(HANDOFF_TONE_HZ, toneStart);
+      gain.gain.setValueAtTime(.0001, toneStart);
+      gain.gain.exponentialRampToValueAtTime(.6, toneStart + .008);
+      gain.gain.setValueAtTime(.6, Math.max(toneStart + .009, toneEnd - .015));
+      gain.gain.exponentialRampToValueAtTime(.0001, toneEnd);
+      oscillator.connect(gain).connect(context.destination);
+      handoffOscillators.add(oscillator);
+      oscillator.addEventListener('ended', () => handoffOscillators.delete(oscillator), { once: true });
+      oscillator.start(toneStart);
+      oscillator.stop(toneEnd + .02);
+    }
+  };
+  playSequence();
+  handoffOutputTimer = window.setInterval(playSequence, HANDOFF_PERIOD_MS);
   return true;
 }
 
@@ -474,6 +511,7 @@ function setConnectedUi() {
   buildingSignal = false;
   stopScanner();
   stopHandoffListener();
+  stopHandoffBeeps();
   stopSignalAnimation();
   resetSignalDecoder();
   setConnectionStatus('connected', 'Live connection', 'Heartbeat active · messages send directly.');
@@ -602,6 +640,7 @@ function disconnectPeer() {
   stopSignalAnimation();
   stopScanner();
   stopHandoffListener();
+  stopHandoffBeeps();
   resetSignalDecoder();
   pairingActive = false;
   buildingSignal = false;
@@ -1213,6 +1252,7 @@ function failPairing(error) {
   buildingSignal = false;
   stopScanner();
   stopHandoffListener();
+  stopHandoffBeeps();
   stopSignalAnimation();
   resetSignalDecoder();
   teardownPeer({ keepMetrics: false });
@@ -1227,6 +1267,7 @@ function failPairing(error) {
 
 function resetPairingState() {
   stopHandoffListener();
+  stopHandoffBeeps();
   resetSignalDecoder();
   pairingSession = '';
   pairingSessionNumber = 0;
@@ -1243,6 +1284,7 @@ function cancelPairDance() {
   pairingActive = false;
   stopScanner();
   stopHandoffListener();
+  stopHandoffBeeps();
   stopSignalAnimation();
   resetPairingState();
   if (wasPairing && !isConnected()) {
@@ -1255,6 +1297,7 @@ function cancelPairDance() {
 async function beginPairDance() {
   stopScanner();
   stopHandoffListener();
+  stopHandoffBeeps();
   stopSignalAnimation();
   teardownPeer({ keepMetrics: false });
   resetPairingState();
@@ -1630,6 +1673,7 @@ window.addEventListener('pagehide', () => {
   pairingActive = false;
   stopScanner();
   stopHandoffListener();
+  stopHandoffBeeps();
   stopSignalAnimation();
   resetSignalDecoder();
   stopHeartbeat();
