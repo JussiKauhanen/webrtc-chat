@@ -42,6 +42,12 @@ const ui = {
   metricRate: $('#metricRate'),
   metricUptime: $('#metricUptime'),
   metricPath: $('#metricPath'),
+  recentView: $('#recentView'),
+  sendView: $('#sendView'),
+  filesView: $('#filesView'),
+  recentTitle: $('#recentTitle'),
+  recentMeta: $('#recentMeta'),
+  recentConnect: $('#recentConnect'),
   stream: $('#messageStream'),
   empty: $('#emptyState'),
   emptyTitle: $('#emptyTitle'),
@@ -80,6 +86,16 @@ const ui = {
   scannerVideo: $('#scannerVideo'),
   scannerCanvas: $('#scannerCanvas'),
   disconnectInSheet: $('#disconnectInSheet'),
+  filesTitle: $('#filesTitle'),
+  clearLibrary: $('#clearLibrary'),
+  backToTypes: $('#backToTypes'),
+  fileSearch: $('#fileSearch'),
+  fileTypeList: $('#fileTypeList'),
+  storedFileList: $('#storedFileList'),
+  libraryEmpty: $('#libraryEmpty'),
+  storageSummary: $('#storageSummary'),
+  storedCount: $('#storedCount'),
+  navButtons: [...document.querySelectorAll('.app-nav [data-view]')],
   toast: $('#toast')
 };
 
@@ -152,10 +168,254 @@ let incomingImage = null;
 let outboundMediaQueue = Promise.resolve();
 const objectUrls = new Set();
 
+const LIBRARY_DB_NAME = 'near-chat-direct';
+const LIBRARY_DB_VERSION = 1;
+let libraryDbPromise = null;
+let currentSession = null;
+let currentSessionItems = [];
+let liveSessionId = '';
+let liveSessionPromise = null;
+let storedFiles = [];
+let selectedFileType = '';
+let currentView = 'send';
+let persistenceRequested = false;
+let libraryErrorShown = false;
+
 function randomId() {
   if (crypto.randomUUID) return crypto.randomUUID();
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function idbRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Local storage failed.'));
+  });
+}
+
+function idbTransaction(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error('Local storage failed.'));
+    transaction.onabort = () => reject(transaction.error || new Error('Local storage was stopped.'));
+  });
+}
+
+function openLibraryDb() {
+  if (libraryDbPromise) return libraryDbPromise;
+  if (!('indexedDB' in window)) return Promise.reject(new Error('Local history is unavailable in this browser.'));
+  libraryDbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(LIBRARY_DB_NAME, LIBRARY_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      const sessions = db.objectStoreNames.contains('sessions')
+        ? request.transaction.objectStore('sessions')
+        : db.createObjectStore('sessions', { keyPath: 'id' });
+      if (!sessions.indexNames.contains('updatedAt')) sessions.createIndex('updatedAt', 'updatedAt');
+      const items = db.objectStoreNames.contains('items')
+        ? request.transaction.objectStore('items')
+        : db.createObjectStore('items', { keyPath: 'id' });
+      if (!items.indexNames.contains('sessionId')) items.createIndex('sessionId', 'sessionId');
+      if (!items.indexNames.contains('createdAt')) items.createIndex('createdAt', 'createdAt');
+    };
+    request.onsuccess = () => {
+      request.result.onversionchange = () => request.result.close();
+      resolve(request.result);
+    };
+    request.onerror = () => {
+      libraryDbPromise = null;
+      reject(request.error || new Error('Local history could not be opened.'));
+    };
+    request.onblocked = () => {
+      libraryDbPromise = null;
+      reject(new Error('Close the other NearChat tabs and reload to use local history.'));
+    };
+  });
+  return libraryDbPromise;
+}
+
+async function getLatestSession() {
+  const db = await openLibraryDb();
+  const transaction = db.transaction('sessions', 'readonly');
+  const request = transaction.objectStore('sessions').index('updatedAt').openCursor(null, 'prev');
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result?.value || null);
+    request.onerror = () => reject(request.error || new Error('Recent session could not be read.'));
+  });
+}
+
+async function getSessionItems(sessionId) {
+  if (!sessionId) return [];
+  const db = await openLibraryDb();
+  const transaction = db.transaction('items', 'readonly');
+  const items = await idbRequest(transaction.objectStore('items').index('sessionId').getAll(sessionId));
+  return items.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+async function getStoredFiles() {
+  const db = await openLibraryDb();
+  const transaction = db.transaction('items', 'readonly');
+  const items = await idbRequest(transaction.objectStore('items').getAll());
+  return items.filter(item => item.kind === 'file' && item.blob instanceof Blob)
+    .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+async function putSession(session) {
+  const db = await openLibraryDb();
+  const transaction = db.transaction('sessions', 'readwrite');
+  transaction.objectStore('sessions').put(session);
+  await idbTransaction(transaction);
+}
+
+async function putSessionItem(session, item) {
+  const db = await openLibraryDb();
+  const transaction = db.transaction(['sessions', 'items'], 'readwrite');
+  transaction.objectStore('sessions').put(session);
+  transaction.objectStore('items').put(item);
+  await idbTransaction(transaction);
+}
+
+async function deleteLibraryItem(id) {
+  const db = await openLibraryDb();
+  const transaction = db.transaction('items', 'readwrite');
+  transaction.objectStore('items').delete(id);
+  await idbTransaction(transaction);
+}
+
+async function clearLibraryData() {
+  const db = await openLibraryDb();
+  const transaction = db.transaction(['sessions', 'items'], 'readwrite');
+  transaction.objectStore('sessions').clear();
+  transaction.objectStore('items').clear();
+  await idbTransaction(transaction);
+}
+
+function requestDurableStorage() {
+  if (persistenceRequested) return;
+  persistenceRequested = true;
+  navigator.storage?.persist?.().catch(() => {});
+}
+
+function showAppView(name) {
+  const requested = name === 'recent' || name === 'files' ? name : 'send';
+  currentView = requested;
+  ui.recentView.hidden = requested !== 'recent';
+  ui.sendView.hidden = requested !== 'send';
+  ui.filesView.hidden = requested !== 'files';
+  for (const button of ui.navButtons)
+    button.setAttribute('aria-selected', String(button.dataset.view === requested));
+  if (requested === 'files') refreshFileLibrary().catch(handleLibraryError);
+}
+
+function sessionTitle(timestamp) {
+  const date = new Date(Number(timestamp) || Date.now());
+  const today = new Date();
+  const sameDay = date.toDateString() === today.toDateString();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const day = sameDay ? 'Today' : date.toDateString() === yesterday.toDateString()
+    ? 'Yesterday'
+    : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return `${day}, ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+function clearRenderedMessages() {
+  ui.stream.querySelectorAll('.message-row').forEach(row => row.remove());
+  for (const url of objectUrls) URL.revokeObjectURL(url);
+  objectUrls.clear();
+  ui.empty.hidden = false;
+}
+
+function setRecentEmpty() {
+  const connected = isConnected();
+  const hasMessages = currentSessionItems.length > 0 || Boolean(ui.stream.querySelector('.message-row'));
+  ui.empty.hidden = hasMessages;
+  ui.emptyTitle.textContent = connected ? 'Ready to send' : currentSession ? 'Nothing in this session' : 'No recent session';
+  ui.emptyCopy.textContent = connected
+    ? 'Use the box below to send text or images to the other device.'
+    : currentSession
+      ? 'Connect again to start a new local chat.'
+      : 'Connect two devices to start a local chat.';
+}
+
+function updateRecentHeader() {
+  ui.recentTitle.textContent = currentSession ? sessionTitle(currentSession.createdAt) : 'Recent';
+  const count = currentSessionItems.length;
+  ui.recentMeta.textContent = currentSession
+    ? `${count} ${count === 1 ? 'item' : 'items'} · stored here`
+    : 'Stored in this browser';
+}
+
+async function renderStoredSession(session) {
+  currentSession = session;
+  currentSessionItems = session ? await getSessionItems(session.id) : [];
+  clearRenderedMessages();
+  for (const item of currentSessionItems) {
+    if (item.kind === 'text') {
+      appendTextMessage({ mine: item.mine, text: item.text, timestamp: item.createdAt,
+        state: item.mine ? 'sent' : 'received' });
+      continue;
+    }
+    if (item.kind === 'file' && item.blob instanceof Blob) {
+      const url = URL.createObjectURL(item.blob);
+      objectUrls.add(url);
+      appendImageMessage({ mine: item.mine, url, text: item.text || '', timestamp: item.createdAt,
+        state: item.mine ? 'sent' : 'received' });
+    }
+  }
+  setRecentEmpty();
+  updateRecentHeader();
+  updateStorageSummary();
+}
+
+async function ensureLiveSession() {
+  if (liveSessionId) return liveSessionId;
+  if (liveSessionPromise) return liveSessionPromise;
+  const now = Date.now();
+  const session = { id: randomId(), createdAt: now, updatedAt: now };
+  liveSessionId = session.id;
+  currentSession = session;
+  currentSessionItems = [];
+  clearRenderedMessages();
+  setRecentEmpty();
+  updateRecentHeader();
+  liveSessionPromise = putSession(session).then(() => {
+    requestDurableStorage();
+    return session.id;
+  }).catch(error => {
+    liveSessionPromise = null;
+    throw error;
+  });
+  return liveSessionPromise;
+}
+
+async function persistLiveItem(item) {
+  try {
+    const sessionId = await ensureLiveSession();
+    const storedItem = { ...item, sessionId };
+    const updatedAt = Math.max(Date.now(), Number(item.createdAt) || 0);
+    const session = { ...currentSession, id: sessionId, updatedAt };
+    await putSessionItem(session, storedItem);
+    currentSession = session;
+    const existing = currentSessionItems.findIndex(entry => entry.id === storedItem.id);
+    if (existing >= 0) currentSessionItems[existing] = storedItem;
+    else currentSessionItems.push(storedItem);
+    currentSessionItems.sort((a, b) => a.createdAt - b.createdAt);
+    updateRecentHeader();
+    updateStorageSummary();
+    if (storedItem.kind === 'file') refreshFileLibrary().catch(handleLibraryError);
+  } catch (error) {
+    handleLibraryError(error);
+  }
+}
+
+function handleLibraryError(error) {
+  console.warn('NearChat local history:', error);
+  if (!libraryErrorShown) {
+    libraryErrorShown = true;
+    showToast('Local history is unavailable. Sharing still works.');
+  }
 }
 
 function showToast(message) {
@@ -425,6 +685,211 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+const FILE_TYPE_ORDER = ['Images', 'Video', 'Audio', 'PDF', 'Archives', 'Documents', 'Spreadsheets', 'Other'];
+const FILE_TYPE_LABEL = {
+  Images: 'IMG', Video: 'VID', Audio: 'AUD', PDF: 'PDF', Archives: 'ZIP',
+  Documents: 'DOC', Spreadsheets: 'XLS', Other: 'FILE'
+};
+
+function fileType(item) {
+  const mime = String(item.mime || item.blob?.type || '').toLowerCase();
+  const name = String(item.name || '').toLowerCase();
+  if (mime.startsWith('image/')) return 'Images';
+  if (mime.startsWith('video/')) return 'Video';
+  if (mime.startsWith('audio/')) return 'Audio';
+  if (mime === 'application/pdf' || name.endsWith('.pdf')) return 'PDF';
+  if (/zip|rar|7z|tar|gzip/.test(mime) || /\.(zip|rar|7z|tar|gz)$/.test(name)) return 'Archives';
+  if (/spreadsheet|excel|csv/.test(mime) || /\.(xls|xlsx|csv|ods)$/.test(name)) return 'Spreadsheets';
+  if (/text|word|document|presentation|powerpoint/.test(mime) || /\.(txt|rtf|doc|docx|odt|ppt|pptx)$/.test(name))
+    return 'Documents';
+  return 'Other';
+}
+
+function fileDate(timestamp) {
+  return new Date(Number(timestamp) || Date.now()).toLocaleString([], {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+  });
+}
+
+function createFileIcon(kind) {
+  const icon = document.createElement('span');
+  icon.className = 'file-type-icon';
+  icon.dataset.kind = kind;
+  icon.textContent = FILE_TYPE_LABEL[kind] || 'FILE';
+  return icon;
+}
+
+function updateStorageSummary() {
+  const bytes = storedFiles.reduce((sum, item) => sum + (item.size || item.blob?.size || 0), 0);
+  const count = storedFiles.length;
+  ui.storageSummary.textContent = `${count} ${count === 1 ? 'file' : 'files'} · ${formatBytes(bytes)} stored in this browser`;
+  ui.storedCount.textContent = String(count);
+  ui.storedCount.hidden = count === 0;
+  ui.clearLibrary.disabled = count === 0 && currentSessionItems.length === 0;
+}
+
+function renderFileRows(files) {
+  ui.storedFileList.replaceChildren();
+  for (const item of files) {
+    const kind = fileType(item);
+    const row = document.createElement('article');
+    row.className = 'stored-file-row';
+    const copy = document.createElement('div');
+    copy.className = 'stored-file-copy';
+    const name = document.createElement('strong');
+    name.textContent = item.name || 'Shared file';
+    const detail = document.createElement('small');
+    detail.textContent = `${fileDate(item.createdAt)} · ${formatBytes(item.size || item.blob.size)}`;
+    copy.append(name, detail);
+    const actions = document.createElement('div');
+    actions.className = 'file-row-actions';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.textContent = 'Save';
+    save.addEventListener('click', () => saveStoredFile(item));
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'delete-file';
+    remove.textContent = 'Delete';
+    remove.addEventListener('click', () => removeStoredFile(item));
+    actions.append(save, remove);
+    row.append(createFileIcon(kind), copy, actions);
+    ui.storedFileList.appendChild(row);
+  }
+}
+
+function renderFileBrowser() {
+  const query = ui.fileSearch.value.trim().toLowerCase();
+  ui.fileTypeList.hidden = true;
+  ui.storedFileList.hidden = true;
+  ui.libraryEmpty.hidden = true;
+  ui.backToTypes.hidden = !selectedFileType && !query;
+
+  if (!storedFiles.length) {
+    ui.filesTitle.textContent = 'Files';
+    ui.libraryEmpty.hidden = false;
+    return;
+  }
+
+  if (query || selectedFileType) {
+    const filtered = storedFiles.filter(item => {
+      const matchesType = !selectedFileType || fileType(item) === selectedFileType;
+      const matchesQuery = !query || String(item.name || '').toLowerCase().includes(query);
+      return matchesType && matchesQuery;
+    });
+    ui.filesTitle.textContent = query ? 'Search' : selectedFileType;
+    if (!filtered.length) {
+      ui.libraryEmpty.querySelector('h2').textContent = 'No matching files';
+      ui.libraryEmpty.querySelector('p').textContent = 'Try another search or file type.';
+      ui.libraryEmpty.hidden = false;
+      return;
+    }
+    renderFileRows(filtered);
+    ui.storedFileList.hidden = false;
+    return;
+  }
+
+  ui.filesTitle.textContent = 'Files';
+  ui.fileTypeList.replaceChildren();
+  for (const kind of FILE_TYPE_ORDER) {
+    const items = storedFiles.filter(item => fileType(item) === kind);
+    if (!items.length) continue;
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'type-row';
+    const copy = document.createElement('span');
+    copy.className = 'type-copy';
+    const title = document.createElement('strong');
+    title.textContent = kind;
+    const count = document.createElement('small');
+    count.textContent = `${items.length} ${items.length === 1 ? 'item' : 'items'}`;
+    copy.append(title, count);
+    const size = document.createElement('span');
+    size.className = 'type-size';
+    size.textContent = formatBytes(items.reduce((sum, item) => sum + (item.size || item.blob.size), 0));
+    const arrow = document.createElement('span');
+    arrow.className = 'type-arrow';
+    arrow.setAttribute('aria-hidden', 'true');
+    arrow.textContent = '›';
+    row.append(createFileIcon(kind), copy, size, arrow);
+    row.addEventListener('click', () => {
+      selectedFileType = kind;
+      renderFileBrowser();
+    });
+    ui.fileTypeList.appendChild(row);
+  }
+  ui.fileTypeList.hidden = false;
+}
+
+async function refreshFileLibrary() {
+  storedFiles = await getStoredFiles();
+  updateStorageSummary();
+  renderFileBrowser();
+}
+
+function safeDownloadName(name, mime) {
+  const cleaned = String(name || '').replace(/[\\/:*?"<>|]/g, '-').slice(0, 120);
+  if (cleaned) return cleaned;
+  return mime?.startsWith('image/') ? 'near-chat-image' : 'near-chat-file';
+}
+
+async function saveStoredFile(item) {
+  const name = safeDownloadName(item.name, item.mime);
+  const file = new File([item.blob], name, { type: item.mime || item.blob.type || 'application/octet-stream' });
+  try {
+    if (navigator.share && navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file], title: name });
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch (error) {
+    if (error?.name !== 'AbortError') showToast('The file could not be saved.');
+  }
+}
+
+async function removeStoredFile(item) {
+  try {
+    await deleteLibraryItem(item.id);
+    if (currentSession?.id === item.sessionId) await renderStoredSession(currentSession);
+    await refreshFileLibrary();
+  } catch (error) {
+    handleLibraryError(error);
+  }
+}
+
+async function clearStoredLibrary() {
+  if (!confirm('Clear the recent session and all stored files from this browser?')) return;
+  try {
+    await clearLibraryData();
+    currentSessionItems = [];
+    if (isConnected() && liveSessionId && currentSession) {
+      currentSession = { ...currentSession, updatedAt: Date.now() };
+      await putSession(currentSession);
+    } else {
+      currentSession = null;
+      liveSessionId = '';
+      liveSessionPromise = null;
+    }
+    clearRenderedMessages();
+    setRecentEmpty();
+    updateRecentHeader();
+    selectedFileType = '';
+    ui.fileSearch.value = '';
+    await refreshFileLibrary();
+    showToast('Local history cleared');
+  } catch (error) {
+    handleLibraryError(error);
+  }
+}
+
 function formatDuration(milliseconds) {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
   const minutes = Math.floor(seconds / 60);
@@ -562,8 +1027,8 @@ function setConnectedUi() {
   stopSignalAnimation();
   resetSignalDecoder();
   document.body.dataset.connected = 'true';
-  ui.emptyTitle.textContent = 'Ready to send';
-  ui.emptyCopy.textContent = 'Use the box below to send text or images to the other device.';
+  showAppView('recent');
+  ensureLiveSession().catch(handleLibraryError);
   setConnectionStatus('connected', 'Live connection', 'Heartbeat active · messages send directly.');
   ui.share.textContent = 'Connection';
   ui.disconnect.hidden = false;
@@ -636,7 +1101,11 @@ function bindChatChannel(channel) {
       return;
     }
     if (packet?.type === 'message' && typeof packet.text === 'string') {
-      appendTextMessage({ mine: false, text: packet.text.slice(0, 2000), timestamp: packet.timestamp });
+      const text = packet.text.slice(0, 2000);
+      const timestamp = Number(packet.timestamp) || Date.now();
+      const id = typeof packet.id === 'string' ? packet.id : randomId();
+      appendTextMessage({ mine: false, text, timestamp });
+      persistLiveItem({ id, kind: 'text', mine: false, text, createdAt: timestamp });
     }
   };
 }
@@ -680,8 +1149,10 @@ function teardownPeer({ keepMetrics = true } = {}) {
   peerRole = null;
   incomingImage = null;
   document.body.dataset.connected = 'false';
-  ui.emptyTitle.textContent = 'Send to a nearby device';
-  ui.emptyCopy.textContent = 'Share text and images with a device near you. No account and no chat server.';
+  liveSessionId = '';
+  liveSessionPromise = null;
+  setRecentEmpty();
+  updateRecentHeader();
   ui.disconnect.hidden = true;
   ui.share.textContent = 'Connect devices';
   if (!keepMetrics) resetMetrics();
@@ -1523,17 +1994,29 @@ function appendImageMessage({ mine, url = '', text = '', timestamp = Date.now(),
 
 function finishIncomingImage() {
   if (!incomingImage || incomingImage.received < incomingImage.size) return;
-  const blob = new Blob(incomingImage.chunks, { type: incomingImage.mime });
+  const completed = incomingImage;
+  const blob = new Blob(completed.chunks, { type: completed.mime });
   const url = URL.createObjectURL(blob);
   objectUrls.add(url);
   const image = document.createElement('img');
   image.className = 'message-image';
   image.src = url;
   image.alt = 'Received image';
-  const progressBox = incomingImage.view.progressFill?.parentElement?.parentElement;
+  const progressBox = completed.view.progressFill?.parentElement?.parentElement;
   progressBox?.replaceWith(image);
-  incomingImage.view.stateNode.textContent = 'received';
+  completed.view.stateNode.textContent = 'received';
   incomingImage = null;
+  persistLiveItem({
+    id: completed.id,
+    kind: 'file',
+    mine: false,
+    name: completed.name,
+    mime: completed.mime,
+    size: blob.size,
+    text: completed.text,
+    blob,
+    createdAt: completed.timestamp
+  });
   scrollMessages();
 }
 
@@ -1548,17 +2031,22 @@ function handleMediaPacket(event) {
     if (packet?.type !== 'image-meta' || typeof packet.id !== 'string' ||
         typeof packet.mime !== 'string' || !Number.isFinite(packet.size) ||
         packet.size < 1 || packet.size > MAX_IMAGE_BYTES) return;
+    const timestamp = Number(packet.timestamp) || Date.now();
+    const text = typeof packet.text === 'string' ? packet.text.slice(0, 2000) : '';
     const view = appendImageMessage({
       mine: false,
-      text: typeof packet.text === 'string' ? packet.text.slice(0, 2000) : '',
-      timestamp: packet.timestamp,
+      text,
+      timestamp,
       state: `0 / ${formatBytes(packet.size)}`,
       progress: true
     });
     incomingImage = {
       id: packet.id,
+      name: typeof packet.name === 'string' ? packet.name.slice(0, 100) : 'Received image',
       mime: /^image\/(?:avif|webp|jpeg|png)$/.test(packet.mime) ? packet.mime : 'image/jpeg',
       size: packet.size,
+      text,
+      timestamp,
       received: 0,
       chunks: [],
       view
@@ -1593,11 +2081,11 @@ function waitForMediaBuffer() {
   });
 }
 
-async function transferImage(image, text, view) {
+async function transferImage(image, text, view, id, timestamp) {
   sendMediaPacket({
     type: 'image-meta',
-    id: randomId(),
-    timestamp: Date.now(),
+    id,
+    timestamp,
     name: image.name,
     mime: image.blob.type,
     size: image.blob.size,
@@ -1741,10 +2229,13 @@ async function submitMessage(event) {
   updateComposer();
 
   if (!images.length) {
-    const view = appendTextMessage({ mine: true, text, state: 'sending' });
+    const id = randomId();
+    const timestamp = Date.now();
+    const view = appendTextMessage({ mine: true, text, timestamp, state: 'sending' });
     try {
-      sendChatPacket({ type: 'message', id: randomId(), timestamp: Date.now(), text });
+      sendChatPacket({ type: 'message', id, timestamp, text });
       view.stateNode.textContent = 'sent';
+      persistLiveItem({ id, kind: 'text', mine: true, text, createdAt: timestamp });
     } catch (error) {
       view.stateNode.textContent = 'failed';
       showToast(error.message);
@@ -1755,8 +2246,21 @@ async function submitMessage(event) {
   images.forEach(({ image, url }, index) => {
     objectUrls.add(url);
     const caption = index === 0 ? text : '';
-    const view = appendImageMessage({ mine: true, url, text: caption, state: 'queued' });
-    const task = outboundMediaQueue.then(() => transferImage(image, caption, view));
+    const id = randomId();
+    const timestamp = Date.now() + index;
+    const view = appendImageMessage({ mine: true, url, text: caption, timestamp, state: 'queued' });
+    persistLiveItem({
+      id,
+      kind: 'file',
+      mine: true,
+      name: image.name || 'Sent image',
+      mime: image.blob.type,
+      size: image.blob.size,
+      text: caption,
+      blob: image.blob,
+      createdAt: timestamp
+    });
+    const task = outboundMediaQueue.then(() => transferImage(image, caption, view, id, timestamp));
     outboundMediaQueue = task.catch(() => {});
     task.catch(error => {
       view.stateNode.textContent = 'failed';
@@ -1773,6 +2277,23 @@ ui.share.addEventListener('click', () => {
   }
   beginPairDance();
 });
+ui.recentConnect.addEventListener('click', beginPairDance);
+for (const button of ui.navButtons) {
+  button.addEventListener('click', () => {
+    const target = button.dataset.view;
+    showAppView(target === 'send' && isConnected() ? 'recent' : target);
+  });
+}
+ui.fileSearch.addEventListener('input', () => {
+  if (ui.fileSearch.value.trim()) selectedFileType = '';
+  renderFileBrowser();
+});
+ui.backToTypes.addEventListener('click', () => {
+  selectedFileType = '';
+  ui.fileSearch.value = '';
+  renderFileBrowser();
+});
+ui.clearLibrary.addEventListener('click', clearStoredLibrary);
 ui.disconnect.addEventListener('click', disconnectPeer);
 ui.disconnectInSheet.addEventListener('click', () => {
   closePairing();
@@ -1834,5 +2355,28 @@ if (!('RTCPeerConnection' in window)) {
   ui.share.disabled = true;
   setConnectionStatus('failed', 'WebRTC unavailable', 'Open this page in a current mobile browser.');
 }
+
+async function initializeLibrary() {
+  try {
+    const [latest] = await Promise.all([getLatestSession(), refreshFileLibrary()]);
+    if (liveSessionId || isConnected()) return;
+    if (latest) {
+      await renderStoredSession(latest);
+      showAppView('recent');
+    } else {
+      showAppView('send');
+      setRecentEmpty();
+      updateRecentHeader();
+    }
+  } catch (error) {
+    console.warn('NearChat local history:', error);
+    ui.clearLibrary.disabled = true;
+    ui.libraryEmpty.querySelector('h2').textContent = 'Local history unavailable';
+    ui.libraryEmpty.querySelector('p').textContent = 'You can still connect and share during this visit.';
+    showAppView('send');
+  }
+}
+
 updateComposer();
 updateMetrics();
+initializeLibrary();

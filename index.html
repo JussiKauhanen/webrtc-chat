@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#eaf4ff">
   <title>NearChat Direct</title>
-  <link rel="stylesheet" href="styles.css?v=2026.08.14.1">
+  <link rel="stylesheet" href="styles.css?v=2026.08.15.2">
 </head>
 <body data-connected="false">
   <main class="app" aria-label="NearChat Direct">
@@ -33,46 +33,91 @@
       <div><span>Path</span><strong id="metricPath">—</strong></div>
     </section>
 
-    <section class="message-stream" id="messageStream" aria-live="polite" aria-label="Chat messages">
-      <div class="empty-state" id="emptyState">
-        <svg class="welcome-art" viewBox="0 0 360 240" role="img" aria-label="Two nearby phones sharing data">
-          <rect class="art-fill" x="30" y="26" width="108" height="188" rx="24"></rect>
-          <rect class="art-line" x="30" y="26" width="108" height="188" rx="24"></rect>
-          <rect class="art-screen" x="43" y="49" width="82" height="132" rx="12"></rect>
-          <path class="art-line" d="M72 199h24"></path>
-          <rect class="art-fill art-fill-light" x="222" y="26" width="108" height="188" rx="24"></rect>
-          <rect class="art-line" x="222" y="26" width="108" height="188" rx="24"></rect>
-          <rect class="art-screen" x="235" y="49" width="82" height="132" rx="12"></rect>
-          <path class="art-line" d="M264 199h24"></path>
-          <path class="art-line art-arrow" d="M140 103h72m-18-18 18 18-18 18"></path>
-          <rect class="art-file" x="61" y="82" width="46" height="57" rx="7"></rect>
-          <path class="art-file-line" d="M72 99h24M72 111h24M72 123h15"></path>
-          <rect class="art-file art-file-end" x="253" y="82" width="46" height="57" rx="7"></rect>
-          <path class="art-file-line" d="M264 99h24M264 111h24M264 123h15"></path>
-        </svg>
-        <span class="eyebrow">Direct device sharing</span>
-        <h1 id="emptyTitle">Send to a nearby device</h1>
-        <p id="emptyCopy">Share text and images with a device near you. No account and no chat server.</p>
-        <button class="share-button" id="shareButton" type="button">Connect devices</button>
-        <small class="start-note">Open this page on both devices.</small>
-      </div>
-    </section>
+    <div class="app-views">
+      <section class="app-view recent-view" id="recentView" aria-label="Recent session" hidden>
+        <header class="view-head">
+          <div><span>Latest session</span><h1 id="recentTitle">Recent</h1></div>
+          <small id="recentMeta">Stored in this browser</small>
+        </header>
+        <section class="message-stream" id="messageStream" aria-live="polite" aria-label="Chat messages">
+          <div class="chat-empty" id="emptyState">
+            <h2 id="emptyTitle">No recent session</h2>
+            <p id="emptyCopy">Connect two devices to start a local chat.</p>
+            <button class="inline-connect" id="recentConnect" type="button">Connect devices</button>
+          </div>
+        </section>
 
-    <form class="composer" id="composer">
-      <div class="image-draft" id="imageDraft" hidden>
-        <img id="imageDraftPreview" alt="Selected image preview">
-        <span><strong id="imageDraftName">Image ready</strong><small id="imageDraftSize"></small></span>
-        <button id="removeImage" type="button" aria-label="Remove selected image">×</button>
-      </div>
-      <div class="composer-row">
-        <button class="image-button" id="imageButton" type="button" aria-label="Choose images">Add</button>
-        <input id="imageInput" type="file" accept="image/*" multiple hidden>
-        <input class="message-input" id="messageInput" type="text" maxlength="2000"
-               autocomplete="off" enterkeyhint="send" placeholder="Connect to start chatting"
-               aria-label="Message" disabled>
-        <button class="send-button" id="sendButton" type="submit" aria-label="Send" disabled>Send</button>
-      </div>
-    </form>
+        <form class="composer" id="composer">
+          <div class="image-draft" id="imageDraft" hidden>
+            <img id="imageDraftPreview" alt="Selected image preview">
+            <span><strong id="imageDraftName">Image ready</strong><small id="imageDraftSize"></small></span>
+            <button id="removeImage" type="button" aria-label="Remove selected image">×</button>
+          </div>
+          <div class="composer-row">
+            <button class="image-button" id="imageButton" type="button" aria-label="Choose images">Add</button>
+            <input id="imageInput" type="file" accept="image/*" multiple hidden>
+            <input class="message-input" id="messageInput" type="text" maxlength="2000"
+                   autocomplete="off" enterkeyhint="send" placeholder="Connect to start chatting"
+                   aria-label="Message" disabled>
+            <button class="send-button" id="sendButton" type="submit" aria-label="Send" disabled>Send</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="app-view send-view" id="sendView" aria-label="Send to a nearby device">
+        <div class="empty-state">
+          <svg class="welcome-art" viewBox="0 0 360 240" role="img" aria-label="Two nearby phones sharing data">
+            <rect class="art-fill" x="30" y="26" width="108" height="188" rx="24"></rect>
+            <rect class="art-line" x="30" y="26" width="108" height="188" rx="24"></rect>
+            <rect class="art-screen" x="43" y="49" width="82" height="132" rx="12"></rect>
+            <path class="art-line" d="M72 199h24"></path>
+            <rect class="art-fill art-fill-light" x="222" y="26" width="108" height="188" rx="24"></rect>
+            <rect class="art-line" x="222" y="26" width="108" height="188" rx="24"></rect>
+            <rect class="art-screen" x="235" y="49" width="82" height="132" rx="12"></rect>
+            <path class="art-line" d="M264 199h24"></path>
+            <path class="art-line art-arrow" d="M140 103h72m-18-18 18 18-18 18"></path>
+            <rect class="art-file" x="61" y="82" width="46" height="57" rx="7"></rect>
+            <path class="art-file-line" d="M72 99h24M72 111h24M72 123h15"></path>
+            <rect class="art-file art-file-end" x="253" y="82" width="46" height="57" rx="7"></rect>
+            <path class="art-file-line" d="M264 99h24M264 111h24M264 123h15"></path>
+          </svg>
+          <span class="eyebrow">Direct device sharing</span>
+          <h1>Send to a nearby device</h1>
+          <p>Share text and images with a device near you. No account and no chat server.</p>
+          <button class="share-button" id="shareButton" type="button">Connect devices</button>
+          <small class="start-note">Open this page on both devices.</small>
+        </div>
+      </section>
+
+      <section class="app-view files-view" id="filesView" aria-label="Stored files" hidden>
+        <header class="view-head files-head">
+          <div><span>On this device</span><h1 id="filesTitle">Files</h1></div>
+          <button class="quiet-button" id="clearLibrary" type="button">Clear all</button>
+        </header>
+        <div class="file-tools">
+          <button class="back-button" id="backToTypes" type="button" hidden>All types</button>
+          <input id="fileSearch" type="search" placeholder="Search stored files" aria-label="Search stored files">
+        </div>
+        <div class="file-browser" id="fileBrowser">
+          <div class="type-list" id="fileTypeList"></div>
+          <div class="stored-file-list" id="storedFileList" hidden></div>
+          <div class="library-empty" id="libraryEmpty" hidden>
+            <h2>No stored files</h2>
+            <p>Images and files from your sessions will appear here.</p>
+          </div>
+        </div>
+        <footer class="storage-summary">
+          <span id="storageSummary">0 items · 0 B stored in this browser</span>
+          <small>Save important files to your device.</small>
+        </footer>
+      </section>
+    </div>
+
+    <nav class="app-nav" aria-label="Main views">
+      <button type="button" data-view="recent" aria-selected="false">Recent</button>
+      <button type="button" data-view="send" aria-selected="true">Send</button>
+      <button type="button" data-view="files" aria-selected="false">Files <span id="storedCount" hidden>0</span></button>
+    </nav>
   </main>
 
   <div class="overlay" id="pairingOverlay" hidden>
@@ -136,6 +181,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=2026.08.14.1"></script>
+  <script type="module" src="app.js?v=2026.08.15.2"></script>
 </body>
 </html>
