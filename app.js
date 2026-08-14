@@ -31,7 +31,6 @@ const MAX_PENDING_IMAGES = 20;
 const MAX_SCAN_PIXELS = 420000;
 
 const ui = {
-  share: $('#shareButton'),
   disconnect: $('#disconnectButton'),
   statusDot: $('#statusDot'),
   statusText: $('#statusText'),
@@ -47,7 +46,12 @@ const ui = {
   filesView: $('#filesView'),
   recentTitle: $('#recentTitle'),
   recentMeta: $('#recentMeta'),
-  recentConnect: $('#recentConnect'),
+  recentSearch: $('#recentSearch'),
+  recentSort: $('#recentSort'),
+  recentItemList: $('#recentItemList'),
+  recentLibraryEmpty: $('#recentLibraryEmpty'),
+  recentStorageText: $('#recentStorageText'),
+  storageBarFill: $('#storageBarFill'),
   stream: $('#messageStream'),
   empty: $('#emptyState'),
   emptyTitle: $('#emptyTitle'),
@@ -176,8 +180,10 @@ let currentSessionItems = [];
 let liveSessionId = '';
 let liveSessionPromise = null;
 let storedFiles = [];
+let recentItems = [];
 let selectedFileType = '';
-let currentView = 'send';
+let currentView = 'recent';
+let recentNewestFirst = true;
 let persistenceRequested = false;
 let libraryErrorShown = false;
 
@@ -261,6 +267,13 @@ async function getStoredFiles() {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
+async function getRecentItems() {
+  const db = await openLibraryDb();
+  const transaction = db.transaction('items', 'readonly');
+  const items = await idbRequest(transaction.objectStore('items').getAll());
+  return items.sort((a, b) => b.createdAt - a.createdAt);
+}
+
 async function putSession(session) {
   const db = await openLibraryDb();
   const transaction = db.transaction('sessions', 'readwrite');
@@ -305,6 +318,7 @@ function showAppView(name) {
   ui.filesView.hidden = requested !== 'files';
   for (const button of ui.navButtons)
     button.setAttribute('aria-selected', String(button.dataset.view === requested));
+  if (requested === 'recent') refreshRecentLibrary().catch(handleLibraryError);
   if (requested === 'files') refreshFileLibrary().catch(handleLibraryError);
 }
 
@@ -404,6 +418,7 @@ async function persistLiveItem(item) {
     currentSessionItems.sort((a, b) => a.createdAt - b.createdAt);
     updateRecentHeader();
     updateStorageSummary();
+    refreshRecentLibrary().catch(handleLibraryError);
     if (storedItem.kind === 'file') refreshFileLibrary().catch(handleLibraryError);
   } catch (error) {
     handleLibraryError(error);
@@ -690,6 +705,11 @@ const FILE_TYPE_LABEL = {
   Images: 'IMG', Video: 'VID', Audio: 'AUD', PDF: 'PDF', Archives: 'ZIP',
   Documents: 'DOC', Spreadsheets: 'XLS', Other: 'FILE'
 };
+const FILE_TYPE_COLOR = {
+  Images: '#ef476f', Video: '#ff941a', Audio: '#9575e6', PDF: '#ed5353',
+  Archives: '#858990', Documents: '#347fe0', Spreadsheets: '#23845b',
+  Other: '#727983', Message: '#347fe0', Link: '#347fe0'
+};
 
 function fileType(item) {
   const mime = String(item.mime || item.blob?.type || '').toLowerCase();
@@ -711,11 +731,29 @@ function fileDate(timestamp) {
   });
 }
 
-function createFileIcon(kind) {
-  const icon = document.createElement('span');
-  icon.className = 'file-type-icon';
-  icon.dataset.kind = kind;
-  icon.textContent = FILE_TYPE_LABEL[kind] || 'FILE';
+function createFileIcon(kind, label = FILE_TYPE_LABEL[kind] || 'FILE') {
+  const namespace = 'http://www.w3.org/2000/svg';
+  const icon = document.createElementNS(namespace, 'svg');
+  icon.setAttribute('viewBox', '0 0 44 52');
+  icon.setAttribute('aria-hidden', 'true');
+  icon.classList.add('file-type-icon');
+  const body = document.createElementNS(namespace, 'path');
+  body.setAttribute('d', 'M7 1.5h20l10 10V46a4.5 4.5 0 0 1-4.5 4.5h-25A4.5 4.5 0 0 1 3 46V6A4.5 4.5 0 0 1 7 1.5Z');
+  body.setAttribute('fill', FILE_TYPE_COLOR[kind] || FILE_TYPE_COLOR.Other);
+  const fold = document.createElementNS(namespace, 'path');
+  fold.setAttribute('d', 'M27 1.5v7a3 3 0 0 0 3 3h7');
+  fold.setAttribute('fill', '#ffffff');
+  fold.setAttribute('fill-opacity', '.34');
+  const text = document.createElementNS(namespace, 'text');
+  text.setAttribute('x', '20');
+  text.setAttribute('y', '37');
+  text.setAttribute('fill', '#fff');
+  text.setAttribute('font-size', label.length > 4 ? '7' : '9');
+  text.setAttribute('font-weight', '800');
+  text.setAttribute('font-family', 'Arial, sans-serif');
+  text.setAttribute('text-anchor', 'middle');
+  text.textContent = label;
+  icon.append(body, fold, text);
   return icon;
 }
 
@@ -726,6 +764,141 @@ function updateStorageSummary() {
   ui.storedCount.textContent = String(count);
   ui.storedCount.hidden = count === 0;
   ui.clearLibrary.disabled = count === 0 && currentSessionItems.length === 0;
+  updateStorageMeter();
+}
+
+async function updateStorageMeter() {
+  const localBytes = storedFiles.reduce((sum, item) => sum + (item.size || item.blob?.size || 0), 0);
+  try {
+    const estimate = await navigator.storage?.estimate?.();
+    if (!estimate?.quota) throw new Error('No quota estimate');
+    const usage = Number(estimate.usage) || localBytes;
+    const percent = Math.min(100, usage / estimate.quota * 100);
+    ui.recentStorageText.textContent = `${formatBytes(usage)} of ${formatBytes(estimate.quota)} browser storage used`;
+    ui.storageBarFill.style.width = `${usage ? Math.max(1, percent) : 0}%`;
+  } catch {
+    ui.recentStorageText.textContent = `${formatBytes(localBytes)} saved by NearChat on this device`;
+    ui.storageBarFill.style.width = localBytes ? '4%' : '0';
+  }
+}
+
+function createItemVisual(item, kind = fileType(item)) {
+  if (kind === 'Images' && item.blob instanceof Blob) {
+    const image = document.createElement('img');
+    image.className = 'file-thumbnail';
+    image.alt = '';
+    const url = URL.createObjectURL(item.blob);
+    const release = () => URL.revokeObjectURL(url);
+    image.addEventListener('load', release, { once: true });
+    image.addEventListener('error', release, { once: true });
+    image.src = url;
+    return image;
+  }
+  return createFileIcon(kind, kind === 'Message' ? 'MSG' : kind === 'Link' ? 'LINK' : undefined);
+}
+
+function recentGroup(timestamp) {
+  const date = new Date(Number(timestamp) || Date.now());
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === today.toDateString()) return 'Today';
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  return date.toLocaleDateString([], { month: 'long', day: 'numeric', year: 'numeric' });
+}
+
+function recentItemName(item) {
+  if (item.kind === 'file') return item.name || 'Shared file';
+  const text = String(item.text || '').replace(/\s+/g, ' ').trim();
+  return text || 'Message';
+}
+
+function recentItemKind(item) {
+  if (item.kind === 'file') return fileType(item);
+  return /^https?:\/\//i.test(String(item.text || '').trim()) ? 'Link' : 'Message';
+}
+
+function copyStoredText(item) {
+  navigator.clipboard?.writeText?.(String(item.text || ''))
+    .then(() => showToast('Message copied'))
+    .catch(() => showToast('The message could not be copied.'));
+}
+
+function createItemMenu(item) {
+  const menu = document.createElement('details');
+  menu.className = 'item-menu';
+  const summary = document.createElement('summary');
+  summary.setAttribute('aria-label', `Actions for ${recentItemName(item)}`);
+  summary.textContent = '•••';
+  const choices = document.createElement('div');
+  choices.className = 'item-menu-popover';
+  const primary = document.createElement('button');
+  primary.type = 'button';
+  primary.textContent = item.kind === 'file' ? 'Save' : 'Copy';
+  primary.addEventListener('click', () => {
+    menu.open = false;
+    if (item.kind === 'file') saveStoredFile(item);
+    else copyStoredText(item);
+  });
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'delete-file';
+  remove.textContent = 'Delete';
+  remove.addEventListener('click', () => {
+    menu.open = false;
+    removeStoredFile(item);
+  });
+  choices.append(primary, remove);
+  menu.append(summary, choices);
+  return menu;
+}
+
+function renderRecentLibrary() {
+  const query = ui.recentSearch.value.trim().toLowerCase();
+  const items = recentItems
+    .filter(item => recentItemName(item).toLowerCase().includes(query))
+    .sort((a, b) => recentNewestFirst ? b.createdAt - a.createdAt : a.createdAt - b.createdAt);
+  ui.recentItemList.replaceChildren();
+  ui.recentItemList.hidden = items.length === 0;
+  ui.recentLibraryEmpty.hidden = items.length !== 0;
+  if (!items.length) {
+    const title = ui.recentLibraryEmpty.querySelector('h2');
+    const copy = ui.recentLibraryEmpty.querySelector('p');
+    title.textContent = query ? 'No matching items' : 'Nothing shared yet';
+    copy.textContent = query ? 'Try another search.' : 'Tap Send below to connect a nearby device.';
+    return;
+  }
+  let group = '';
+  for (const item of items) {
+    const nextGroup = recentGroup(item.createdAt);
+    if (nextGroup !== group) {
+      group = nextGroup;
+      const heading = document.createElement('h2');
+      heading.className = 'recent-group-title';
+      heading.textContent = group;
+      ui.recentItemList.appendChild(heading);
+    }
+    const kind = recentItemKind(item);
+    const row = document.createElement('article');
+    row.className = 'recent-item-row';
+    const copy = document.createElement('div');
+    copy.className = 'recent-item-copy';
+    const title = document.createElement('strong');
+    title.textContent = recentItemName(item);
+    const detail = document.createElement('small');
+    detail.textContent = item.kind === 'file'
+      ? `${fileDate(item.createdAt)} · ${formatBytes(item.size || item.blob?.size || 0)}`
+      : `${fileDate(item.createdAt)} · ${kind}`;
+    copy.append(title, detail);
+    row.append(createItemVisual(item, kind), copy, createItemMenu(item));
+    ui.recentItemList.appendChild(row);
+  }
+}
+
+async function refreshRecentLibrary() {
+  recentItems = await getRecentItems();
+  renderRecentLibrary();
+  updateStorageMeter();
 }
 
 function renderFileRows(files) {
@@ -753,7 +926,7 @@ function renderFileRows(files) {
     remove.textContent = 'Delete';
     remove.addEventListener('click', () => removeStoredFile(item));
     actions.append(save, remove);
-    row.append(createFileIcon(kind), copy, actions);
+    row.append(createItemVisual(item, kind), copy, actions);
     ui.storedFileList.appendChild(row);
   }
 }
@@ -766,7 +939,9 @@ function renderFileBrowser() {
   ui.backToTypes.hidden = !selectedFileType && !query;
 
   if (!storedFiles.length) {
-    ui.filesTitle.textContent = 'Files';
+    ui.filesTitle.textContent = 'Types';
+    ui.libraryEmpty.querySelector('h2').textContent = 'No stored files';
+    ui.libraryEmpty.querySelector('p').textContent = 'Images and files from your sessions will appear here.';
     ui.libraryEmpty.hidden = false;
     return;
   }
@@ -789,7 +964,7 @@ function renderFileBrowser() {
     return;
   }
 
-  ui.filesTitle.textContent = 'Files';
+  ui.filesTitle.textContent = 'Types';
   ui.fileTypeList.replaceChildren();
   for (const kind of FILE_TYPE_ORDER) {
     const items = storedFiles.filter(item => fileType(item) === kind);
@@ -859,7 +1034,7 @@ async function removeStoredFile(item) {
   try {
     await deleteLibraryItem(item.id);
     if (currentSession?.id === item.sessionId) await renderStoredSession(currentSession);
-    await refreshFileLibrary();
+    await Promise.all([refreshFileLibrary(), refreshRecentLibrary()]);
   } catch (error) {
     handleLibraryError(error);
   }
@@ -883,7 +1058,7 @@ async function clearStoredLibrary() {
     updateRecentHeader();
     selectedFileType = '';
     ui.fileSearch.value = '';
-    await refreshFileLibrary();
+    await Promise.all([refreshFileLibrary(), refreshRecentLibrary()]);
     showToast('Local history cleared');
   } catch (error) {
     handleLibraryError(error);
@@ -1027,10 +1202,9 @@ function setConnectedUi() {
   stopSignalAnimation();
   resetSignalDecoder();
   document.body.dataset.connected = 'true';
-  showAppView('recent');
+  showAppView('send');
   ensureLiveSession().catch(handleLibraryError);
   setConnectionStatus('connected', 'Live connection', 'Heartbeat active · messages send directly.');
-  ui.share.textContent = 'Connection';
   ui.disconnect.hidden = false;
   navigator.vibrate?.([70, 50, 130]);
   startHeartbeat();
@@ -1052,6 +1226,7 @@ function updateConnectionFromPeer() {
     else {
       stopHeartbeat();
       setConnectionStatus('stale', 'Chat channel closed', 'Press Connect to pair the devices again.');
+      if (currentView === 'send') showAppView('recent');
       updateComposer();
     }
     return;
@@ -1067,11 +1242,13 @@ function updateConnectionFromPeer() {
   if (state === 'failed') {
     stopHeartbeat();
     setConnectionStatus('failed', 'Connection failed', 'Press Connect to pair the devices again.');
+    if (currentView === 'send') showAppView('recent');
     updateComposer();
     return;
   }
   if (state === 'closed') {
     setConnectionStatus('offline', 'Not connected', 'Pair two nearby devices to begin.');
+    if (currentView === 'send') showAppView('recent');
     updateComposer();
   }
 }
@@ -1154,7 +1331,7 @@ function teardownPeer({ keepMetrics = true } = {}) {
   setRecentEmpty();
   updateRecentHeader();
   ui.disconnect.hidden = true;
-  ui.share.textContent = 'Connect devices';
+  if (currentView === 'send') showAppView('recent');
   if (!keepMetrics) resetMetrics();
   updateComposer();
 }
@@ -1173,6 +1350,7 @@ function disconnectPeer() {
   pairingSessionNumber = 0;
   signalFrames = [];
   setConnectionStatus('offline', 'Not connected', 'Pair two nearby devices to begin.');
+  showAppView('recent');
   showToast('Direct connection closed');
 }
 
@@ -2269,21 +2447,22 @@ async function submitMessage(event) {
   });
 }
 
-ui.share.addEventListener('click', () => {
-  if (isConnected()) {
-    openPairing();
-    setPairView('connected');
-    return;
-  }
-  beginPairDance();
-});
-ui.recentConnect.addEventListener('click', beginPairDance);
 for (const button of ui.navButtons) {
   button.addEventListener('click', () => {
     const target = button.dataset.view;
-    showAppView(target === 'send' && isConnected() ? 'recent' : target);
+    if (target === 'send' && !isConnected()) {
+      beginPairDance();
+      return;
+    }
+    showAppView(target);
   });
 }
+ui.recentSearch.addEventListener('input', renderRecentLibrary);
+ui.recentSort.addEventListener('click', () => {
+  recentNewestFirst = !recentNewestFirst;
+  ui.recentSort.firstChild.textContent = recentNewestFirst ? 'Date modified ' : 'Oldest first ';
+  renderRecentLibrary();
+});
 ui.fileSearch.addEventListener('input', () => {
   if (ui.fileSearch.value.trim()) selectedFileType = '';
   renderFileBrowser();
@@ -2352,28 +2531,31 @@ window.addEventListener('beforeunload', () => {
 });
 
 if (!('RTCPeerConnection' in window)) {
-  ui.share.disabled = true;
+  const sendNav = ui.navButtons.find(button => button.dataset.view === 'send');
+  if (sendNav) sendNav.disabled = true;
   setConnectionStatus('failed', 'WebRTC unavailable', 'Open this page in a current mobile browser.');
 }
 
 async function initializeLibrary() {
   try {
-    const [latest] = await Promise.all([getLatestSession(), refreshFileLibrary()]);
+    const [latest] = await Promise.all([getLatestSession(), refreshFileLibrary(), refreshRecentLibrary()]);
     if (liveSessionId || isConnected()) return;
     if (latest) {
       await renderStoredSession(latest);
-      showAppView('recent');
     } else {
-      showAppView('send');
       setRecentEmpty();
       updateRecentHeader();
     }
+    showAppView('recent');
   } catch (error) {
     console.warn('NearChat local history:', error);
     ui.clearLibrary.disabled = true;
     ui.libraryEmpty.querySelector('h2').textContent = 'Local history unavailable';
     ui.libraryEmpty.querySelector('p').textContent = 'You can still connect and share during this visit.';
-    showAppView('send');
+    ui.recentLibraryEmpty.querySelector('h2').textContent = 'Local history unavailable';
+    ui.recentLibraryEmpty.querySelector('p').textContent = 'Tap Send to connect. Items will last only for this visit.';
+    ui.recentLibraryEmpty.hidden = false;
+    showAppView('recent');
   }
 }
 

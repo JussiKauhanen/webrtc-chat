@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#eaf4ff">
   <title>NearChat Direct</title>
-  <link rel="stylesheet" href="styles.css?v=2026.08.15.2">
+  <link rel="stylesheet" href="styles.css?v=2026.08.15.3">
 </head>
 <body data-connected="false">
   <main class="app" aria-label="NearChat Direct">
@@ -34,16 +34,38 @@
     </section>
 
     <div class="app-views">
-      <section class="app-view recent-view" id="recentView" aria-label="Recent session" hidden>
+      <section class="app-view recent-view" id="recentView" aria-label="Recent items">
+        <header class="recents-head">
+          <h1>Recents</h1>
+          <span>On this device</span>
+        </header>
+        <div class="recent-tools">
+          <label class="search-field">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+            <input id="recentSearch" type="search" placeholder="Search" aria-label="Search recent items">
+          </label>
+          <button class="recent-sort" id="recentSort" type="button">Date modified <span aria-hidden="true">⌄</span></button>
+        </div>
+        <div class="recent-browser" id="recentItemList"></div>
+        <div class="library-empty recent-library-empty" id="recentLibraryEmpty" hidden>
+          <h2>Nothing shared yet</h2>
+          <p>Tap Send below to connect a nearby device.</p>
+        </div>
+        <footer class="storage-meter">
+          <span id="recentStorageText">Checking browser storage…</span>
+          <div class="storage-track" aria-hidden="true"><span id="storageBarFill"></span></div>
+        </footer>
+      </section>
+
+      <section class="app-view send-view" id="sendView" aria-label="Current transfer" hidden>
         <header class="view-head">
-          <div><span>Latest session</span><h1 id="recentTitle">Recent</h1></div>
+          <div><span>Current transfer</span><h1 id="recentTitle">New connection</h1></div>
           <small id="recentMeta">Stored in this browser</small>
         </header>
         <section class="message-stream" id="messageStream" aria-live="polite" aria-label="Chat messages">
           <div class="chat-empty" id="emptyState">
-            <h2 id="emptyTitle">No recent session</h2>
-            <p id="emptyCopy">Connect two devices to start a local chat.</p>
-            <button class="inline-connect" id="recentConnect" type="button">Connect devices</button>
+            <h2 id="emptyTitle">Ready to send</h2>
+            <p id="emptyCopy">Use the box below to send text or images.</p>
           </div>
         </section>
 
@@ -64,34 +86,9 @@
         </form>
       </section>
 
-      <section class="app-view send-view" id="sendView" aria-label="Send to a nearby device">
-        <div class="empty-state">
-          <svg class="welcome-art" viewBox="0 0 360 240" role="img" aria-label="Two nearby phones sharing data">
-            <rect class="art-fill" x="30" y="26" width="108" height="188" rx="24"></rect>
-            <rect class="art-line" x="30" y="26" width="108" height="188" rx="24"></rect>
-            <rect class="art-screen" x="43" y="49" width="82" height="132" rx="12"></rect>
-            <path class="art-line" d="M72 199h24"></path>
-            <rect class="art-fill art-fill-light" x="222" y="26" width="108" height="188" rx="24"></rect>
-            <rect class="art-line" x="222" y="26" width="108" height="188" rx="24"></rect>
-            <rect class="art-screen" x="235" y="49" width="82" height="132" rx="12"></rect>
-            <path class="art-line" d="M264 199h24"></path>
-            <path class="art-line art-arrow" d="M140 103h72m-18-18 18 18-18 18"></path>
-            <rect class="art-file" x="61" y="82" width="46" height="57" rx="7"></rect>
-            <path class="art-file-line" d="M72 99h24M72 111h24M72 123h15"></path>
-            <rect class="art-file art-file-end" x="253" y="82" width="46" height="57" rx="7"></rect>
-            <path class="art-file-line" d="M264 99h24M264 111h24M264 123h15"></path>
-          </svg>
-          <span class="eyebrow">Direct device sharing</span>
-          <h1>Send to a nearby device</h1>
-          <p>Share text and images with a device near you. No account and no chat server.</p>
-          <button class="share-button" id="shareButton" type="button">Connect devices</button>
-          <small class="start-note">Open this page on both devices.</small>
-        </div>
-      </section>
-
       <section class="app-view files-view" id="filesView" aria-label="Stored files" hidden>
         <header class="view-head files-head">
-          <div><span>On this device</span><h1 id="filesTitle">Files</h1></div>
+          <div><span>On this device</span><h1 id="filesTitle">Types</h1></div>
           <button class="quiet-button" id="clearLibrary" type="button">Clear all</button>
         </header>
         <div class="file-tools">
@@ -114,9 +111,18 @@
     </div>
 
     <nav class="app-nav" aria-label="Main views">
-      <button type="button" data-view="recent" aria-selected="false">Recent</button>
-      <button type="button" data-view="send" aria-selected="true">Send</button>
-      <button type="button" data-view="files" aria-selected="false">Files <span id="storedCount" hidden>0</span></button>
+      <button type="button" data-view="recent" aria-selected="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2.75h8l4 4V21.25H6z"></path><path d="M14 2.75v4h4"></path></svg>
+        <span class="nav-label">Recents</span>
+      </button>
+      <button type="button" data-view="send" aria-selected="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+        <span class="nav-label">Send</span>
+      </button>
+      <button type="button" data-view="files" aria-selected="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
+        <span class="nav-label">Types</span><span class="nav-count" id="storedCount" hidden>0</span>
+      </button>
     </nav>
   </main>
 
@@ -181,6 +187,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=2026.08.15.2"></script>
+  <script type="module" src="app.js?v=2026.08.15.3"></script>
 </body>
 </html>
