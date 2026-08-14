@@ -4,29 +4,27 @@
   <meta charset="utf-8">
   <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAiUlEQVR4AeyUwQqAMAxDyz5Tb/pdHv3Oye4BQwgbjAg92ZTH62g7+tVXVqvFXwBiABp46ylHMe8bAjBBV08AoIGz7nIUsyYIwARdPQGABpQboK4EAqjDlFwAoAHlBij6RwYCjB+zKgDQAHMHXCuCAK7hzJwAQAPMHWD0Mj0QgAm6egKwv4G/t/IBAAD//1uiyr8AAAAGSURBVAMAmGKngf48JPMAAAAASUVORK5CYII=">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#08110f">
+  <meta name="theme-color" content="#eaf4ff">
   <title>NearChat Direct</title>
-  <link rel="stylesheet" href="styles.css?v=2026.08.08.6">
+  <link rel="stylesheet" href="styles.css?v=2026.08.14.1">
 </head>
-<body>
+<body data-connected="false">
   <main class="app" aria-label="NearChat Direct">
     <header class="topbar">
       <a class="brand" href="./" aria-label="NearChat Direct home">
         <span class="brand-mark" aria-hidden="true"></span>
         <span>NearChat <small>Direct</small></span>
       </a>
-      <button class="share-button" id="shareButton" type="button">Connect</button>
+      <div class="connection-actions" aria-label="Connection status">
+        <div class="connection-state">
+          <span class="status-dot" id="statusDot" data-state="offline" aria-hidden="true"></span>
+          <span><strong id="statusText">Not connected</strong><small id="statusDetail">Pair two nearby devices to begin.</small></span>
+        </div>
+        <button class="text-button" id="disconnectButton" type="button" hidden>Disconnect</button>
+      </div>
     </header>
 
-    <section class="connection-bar" aria-label="Connection status">
-      <div class="connection-state">
-        <span class="status-dot" id="statusDot" data-state="offline" aria-hidden="true"></span>
-        <span><strong id="statusText">Not connected</strong><small id="statusDetail">Pair two nearby devices to begin.</small></span>
-      </div>
-      <button class="text-button" id="disconnectButton" type="button" hidden>Disconnect</button>
-    </section>
-
-    <section class="metrics" aria-label="Live connection metrics">
+    <section class="metrics" aria-label="Live connection metrics" hidden>
       <div><span>RTT</span><strong id="metricRtt">—</strong></div>
       <div><span>Sent</span><strong id="metricSent">0 B</strong></div>
       <div><span>Received</span><strong id="metricReceived">0 B</strong></div>
@@ -37,9 +35,26 @@
 
     <section class="message-stream" id="messageStream" aria-live="polite" aria-label="Chat messages">
       <div class="empty-state" id="emptyState">
-        <span aria-hidden="true">↗</span>
-        <h1>One direct chat.</h1>
-        <p>Press Connect on both devices and point the cameras at the other screen. NearChat chooses who shares the first code.</p>
+        <svg class="welcome-art" viewBox="0 0 360 240" role="img" aria-label="Two nearby phones sharing data">
+          <rect class="art-fill" x="30" y="26" width="108" height="188" rx="24"></rect>
+          <rect class="art-line" x="30" y="26" width="108" height="188" rx="24"></rect>
+          <rect class="art-screen" x="43" y="49" width="82" height="132" rx="12"></rect>
+          <path class="art-line" d="M72 199h24"></path>
+          <rect class="art-fill art-fill-light" x="222" y="26" width="108" height="188" rx="24"></rect>
+          <rect class="art-line" x="222" y="26" width="108" height="188" rx="24"></rect>
+          <rect class="art-screen" x="235" y="49" width="82" height="132" rx="12"></rect>
+          <path class="art-line" d="M264 199h24"></path>
+          <path class="art-line art-arrow" d="M140 103h72m-18-18 18 18-18 18"></path>
+          <rect class="art-file" x="61" y="82" width="46" height="57" rx="7"></rect>
+          <path class="art-file-line" d="M72 99h24M72 111h24M72 123h15"></path>
+          <rect class="art-file art-file-end" x="253" y="82" width="46" height="57" rx="7"></rect>
+          <path class="art-file-line" d="M264 99h24M264 111h24M264 123h15"></path>
+        </svg>
+        <span class="eyebrow">Direct device sharing</span>
+        <h1 id="emptyTitle">Send to a nearby device</h1>
+        <p id="emptyCopy">Share text and images with a device near you. No account and no chat server.</p>
+        <button class="share-button" id="shareButton" type="button">Connect devices</button>
+        <small class="start-note">Open this page on both devices.</small>
       </div>
     </section>
 
@@ -50,12 +65,12 @@
         <button id="removeImage" type="button" aria-label="Remove selected image">×</button>
       </div>
       <div class="composer-row">
-        <button class="image-button" id="imageButton" type="button" aria-label="Choose images">＋</button>
+        <button class="image-button" id="imageButton" type="button" aria-label="Choose images">Add</button>
         <input id="imageInput" type="file" accept="image/*" multiple hidden>
         <input class="message-input" id="messageInput" type="text" maxlength="2000"
                autocomplete="off" enterkeyhint="send" placeholder="Connect to start chatting"
                aria-label="Message" disabled>
-        <button class="send-button" id="sendButton" type="submit" aria-label="Send" disabled>↑</button>
+        <button class="send-button" id="sendButton" type="submit" aria-label="Send" disabled>Send</button>
       </div>
     </form>
   </main>
@@ -63,7 +78,7 @@
   <div class="overlay" id="pairingOverlay" hidden>
     <section class="pairing-sheet" role="dialog" aria-modal="true" aria-labelledby="pairingTitle">
       <header class="sheet-head">
-        <div><span class="sheet-kicker">Direct pairing</span><h2 id="pairingTitle">Connect two devices</h2></div>
+        <div><h2 id="pairingTitle">Connect devices</h2></div>
         <button class="close-button" id="closePairing" type="button" aria-label="Close pairing">×</button>
       </header>
 
@@ -121,6 +136,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=2026.08.08.6"></script>
+  <script type="module" src="app.js?v=2026.08.14.1"></script>
 </body>
 </html>

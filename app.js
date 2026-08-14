@@ -44,6 +44,8 @@ const ui = {
   metricPath: $('#metricPath'),
   stream: $('#messageStream'),
   empty: $('#emptyState'),
+  emptyTitle: $('#emptyTitle'),
+  emptyCopy: $('#emptyCopy'),
   composer: $('#composer'),
   input: $('#messageInput'),
   send: $('#sendButton'),
@@ -559,6 +561,9 @@ function setConnectedUi() {
   stopHandoffBeeps();
   stopSignalAnimation();
   resetSignalDecoder();
+  document.body.dataset.connected = 'true';
+  ui.emptyTitle.textContent = 'Ready to send';
+  ui.emptyCopy.textContent = 'Use the box below to send text or images to the other device.';
   setConnectionStatus('connected', 'Live connection', 'Heartbeat active · messages send directly.');
   ui.share.textContent = 'Connection';
   ui.disconnect.hidden = false;
@@ -674,8 +679,11 @@ function teardownPeer({ keepMetrics = true } = {}) {
   mediaChannel = null;
   peerRole = null;
   incomingImage = null;
+  document.body.dataset.connected = 'false';
+  ui.emptyTitle.textContent = 'Send to a nearby device';
+  ui.emptyCopy.textContent = 'Share text and images with a device near you. No account and no chat server.';
   ui.disconnect.hidden = true;
-  ui.share.textContent = 'Connect';
+  ui.share.textContent = 'Connect devices';
   if (!keepMetrics) resetMetrics();
   updateComposer();
 }
