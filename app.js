@@ -97,6 +97,11 @@ const ui = {
   fileTypeList: $('#fileTypeList'),
   storedFileList: $('#storedFileList'),
   libraryEmpty: $('#libraryEmpty'),
+  imageBatchActions: $('#imageBatchActions'),
+  selectedImageCount: $('#selectedImageCount'),
+  selectAllImages: $('#selectAllImages'),
+  downloadSelectedImages: $('#downloadSelectedImages'),
+  clearImageSelection: $('#clearImageSelection'),
   storageSummary: $('#storageSummary'),
   storedCount: $('#storedCount'),
   navButtons: [...document.querySelectorAll('.app-nav [data-view]')],
@@ -182,6 +187,7 @@ let liveSessionPromise = null;
 let storedFiles = [];
 let recentItems = [];
 let selectedFileType = '';
+const selectedStoredImageIds = new Set();
 let currentView = 'recent';
 let recentNewestFirst = true;
 let persistenceRequested = false;
@@ -901,12 +907,44 @@ async function refreshRecentLibrary() {
   updateStorageMeter();
 }
 
+function toggleStoredImageSelection(id) {
+  if (selectedStoredImageIds.has(id)) selectedStoredImageIds.delete(id);
+  else selectedStoredImageIds.add(id);
+  renderFileBrowser();
+}
+
+function createFileAction(label, iconClass, extraClass = '') {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `file-action ${extraClass}`.trim();
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  const icon = document.createElement('span');
+  icon.className = iconClass;
+  icon.setAttribute('aria-hidden', 'true');
+  button.appendChild(icon);
+  return button;
+}
+
 function renderFileRows(files) {
   ui.storedFileList.replaceChildren();
   for (const item of files) {
     const kind = fileType(item);
     const row = document.createElement('article');
     row.className = 'stored-file-row';
+    const visual = createItemVisual(item, kind);
+    if (selectedFileType === 'Images' && kind === 'Images') {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'selection-toggle';
+      toggle.setAttribute('aria-label', `${selectedStoredImageIds.has(item.id) ? 'Unselect' : 'Select'} ${item.name || 'image'}`);
+      toggle.setAttribute('aria-pressed', String(selectedStoredImageIds.has(item.id)));
+      toggle.appendChild(visual);
+      toggle.addEventListener('click', () => toggleStoredImageSelection(item.id));
+      row.appendChild(toggle);
+    } else {
+      row.appendChild(visual);
+    }
     const copy = document.createElement('div');
     copy.className = 'stored-file-copy';
     const name = document.createElement('strong');
@@ -916,19 +954,51 @@ function renderFileRows(files) {
     copy.append(name, detail);
     const actions = document.createElement('div');
     actions.className = 'file-row-actions';
-    const save = document.createElement('button');
-    save.type = 'button';
-    save.textContent = 'Save';
-    save.addEventListener('click', () => saveStoredFile(item));
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'delete-file';
-    remove.textContent = 'Delete';
-    remove.addEventListener('click', () => removeStoredFile(item));
-    actions.append(save, remove);
-    row.append(createItemVisual(item, kind), copy, actions);
+    actions.dataset.confirming = 'false';
+    const download = createFileAction(`Download ${item.name || 'file'}`, 'download-icon');
+    download.addEventListener('click', () => downloadStoredFile(item));
+    const remove = createFileAction(`Delete ${item.name || 'file'}`, 'trash-icon', 'delete-file');
+    const confirmation = document.createElement('div');
+    confirmation.className = 'inline-delete-confirm';
+    confirmation.hidden = true;
+    const question = document.createElement('span');
+    question.textContent = 'Delete?';
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.textContent = 'Delete';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'cancel-delete';
+    cancel.textContent = 'Cancel';
+    remove.addEventListener('click', () => {
+      actions.dataset.confirming = 'true';
+      confirmation.hidden = false;
+    });
+    cancel.addEventListener('click', () => {
+      actions.dataset.confirming = 'false';
+      confirmation.hidden = true;
+    });
+    confirm.addEventListener('click', () => removeStoredFile(item));
+    confirmation.append(question, confirm, cancel);
+    actions.append(download, remove, confirmation);
+    row.append(copy, actions);
     ui.storedFileList.appendChild(row);
   }
+}
+
+function updateImageBatchActions() {
+  const imageItems = storedFiles.filter(item => fileType(item) === 'Images');
+  const validIds = new Set(imageItems.map(item => item.id));
+  for (const id of selectedStoredImageIds)
+    if (!validIds.has(id)) selectedStoredImageIds.delete(id);
+  const visible = selectedFileType === 'Images' && !ui.fileSearch.value.trim();
+  ui.imageBatchActions.hidden = !visible;
+  if (!visible) return;
+  const count = selectedStoredImageIds.size;
+  ui.selectedImageCount.textContent = `${count} selected`;
+  ui.downloadSelectedImages.disabled = count === 0;
+  ui.clearImageSelection.disabled = count === 0;
+  ui.selectAllImages.textContent = imageItems.length > 0 && count === imageItems.length ? 'Unselect all' : 'Select all';
 }
 
 function renderFileBrowser() {
@@ -936,6 +1006,7 @@ function renderFileBrowser() {
   ui.fileTypeList.hidden = true;
   ui.storedFileList.hidden = true;
   ui.libraryEmpty.hidden = true;
+  ui.imageBatchActions.hidden = true;
   ui.backToTypes.hidden = !selectedFileType && !query;
 
   if (!storedFiles.length) {
@@ -961,6 +1032,7 @@ function renderFileBrowser() {
     }
     renderFileRows(filtered);
     ui.storedFileList.hidden = false;
+    updateImageBatchActions();
     return;
   }
 
@@ -989,6 +1061,7 @@ function renderFileBrowser() {
     row.append(createFileIcon(kind), copy, size, arrow);
     row.addEventListener('click', () => {
       selectedFileType = kind;
+      if (kind !== 'Images') selectedStoredImageIds.clear();
       renderFileBrowser();
     });
     ui.fileTypeList.appendChild(row);
@@ -1008,23 +1081,57 @@ function safeDownloadName(name, mime) {
   return mime?.startsWith('image/') ? 'near-chat-image' : 'near-chat-file';
 }
 
-async function saveStoredFile(item) {
+function storedItemFile(item) {
   const name = safeDownloadName(item.name, item.mime);
-  const file = new File([item.blob], name, { type: item.mime || item.blob.type || 'application/octet-stream' });
+  return new File([item.blob], name, { type: item.mime || item.blob.type || 'application/octet-stream' });
+}
+
+function triggerFileDownload(file) {
+  const url = URL.createObjectURL(file);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = file.name;
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+function downloadStoredFile(item) {
+  try {
+    triggerFileDownload(storedItemFile(item));
+  } catch {
+    showToast('The file could not be downloaded.');
+  }
+}
+
+async function downloadSelectedImageFiles() {
+  const selected = storedFiles.filter(item => selectedStoredImageIds.has(item.id) && fileType(item) === 'Images');
+  if (!selected.length) return;
+  try {
+    const files = selected.map(storedItemFile);
+    if (navigator.share && navigator.canShare?.({ files })) {
+      await navigator.share({ files, title: `${files.length} NearChat images` });
+    } else {
+      files.forEach(triggerFileDownload);
+      showToast(`${files.length} image${files.length === 1 ? '' : 's'} downloaded`);
+    }
+    selectedStoredImageIds.clear();
+    renderFileBrowser();
+  } catch (error) {
+    if (error?.name !== 'AbortError') showToast('The selected images could not be downloaded.');
+  }
+}
+
+async function saveStoredFile(item) {
+  const file = storedItemFile(item);
   try {
     if (navigator.share && navigator.canShare?.({ files: [file] })) {
-      await navigator.share({ files: [file], title: name });
+      await navigator.share({ files: [file], title: file.name });
       return;
     }
-    const url = URL.createObjectURL(file);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = name;
-    link.rel = 'noopener';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    triggerFileDownload(file);
   } catch (error) {
     if (error?.name !== 'AbortError') showToast('The file could not be saved.');
   }
@@ -1033,6 +1140,7 @@ async function saveStoredFile(item) {
 async function removeStoredFile(item) {
   try {
     await deleteLibraryItem(item.id);
+    selectedStoredImageIds.delete(item.id);
     if (currentSession?.id === item.sessionId) await renderStoredSession(currentSession);
     await Promise.all([refreshFileLibrary(), refreshRecentLibrary()]);
   } catch (error) {
@@ -1057,6 +1165,7 @@ async function clearStoredLibrary() {
     setRecentEmpty();
     updateRecentHeader();
     selectedFileType = '';
+    selectedStoredImageIds.clear();
     ui.fileSearch.value = '';
     await Promise.all([refreshFileLibrary(), refreshRecentLibrary()]);
     showToast('Local history cleared');
@@ -2464,14 +2573,30 @@ ui.recentSort.addEventListener('click', () => {
   renderRecentLibrary();
 });
 ui.fileSearch.addEventListener('input', () => {
-  if (ui.fileSearch.value.trim()) selectedFileType = '';
+  if (ui.fileSearch.value.trim()) {
+    selectedFileType = '';
+    selectedStoredImageIds.clear();
+  }
   renderFileBrowser();
 });
 ui.backToTypes.addEventListener('click', () => {
   selectedFileType = '';
+  selectedStoredImageIds.clear();
   ui.fileSearch.value = '';
   renderFileBrowser();
 });
+ui.selectAllImages.addEventListener('click', () => {
+  const images = storedFiles.filter(item => fileType(item) === 'Images');
+  const allSelected = images.length > 0 && images.every(item => selectedStoredImageIds.has(item.id));
+  selectedStoredImageIds.clear();
+  if (!allSelected) images.forEach(item => selectedStoredImageIds.add(item.id));
+  renderFileBrowser();
+});
+ui.clearImageSelection.addEventListener('click', () => {
+  selectedStoredImageIds.clear();
+  renderFileBrowser();
+});
+ui.downloadSelectedImages.addEventListener('click', downloadSelectedImageFiles);
 ui.clearLibrary.addEventListener('click', clearStoredLibrary);
 ui.disconnect.addEventListener('click', disconnectPeer);
 ui.disconnectInSheet.addEventListener('click', () => {
