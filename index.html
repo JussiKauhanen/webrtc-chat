@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#eaf4ff">
   <title>NearChat Direct</title>
-  <link rel="stylesheet" href="styles.css?v=2026.08.15.4">
+  <link rel="stylesheet" href="styles.css?v=2026.08.16.1">
 </head>
 <body data-connected="false">
   <main class="app" aria-label="NearChat Direct">
@@ -94,6 +94,15 @@
         <div class="file-tools">
           <button class="back-button" id="backToTypes" type="button" hidden>All types</button>
           <input id="fileSearch" type="search" placeholder="Search stored files" aria-label="Search stored files">
+          <div class="file-tool-actions" id="imageSelectionTools" hidden>
+            <button class="tool-icon-button" id="selectAllImages" type="button" aria-label="Select all images" aria-pressed="false">
+              <span class="checkbox-icon" aria-hidden="true"></span>
+            </button>
+            <button class="tool-icon-button" id="downloadSelectedImages" type="button" aria-label="Download selected images" disabled>
+              <span class="download-icon" aria-hidden="true"></span>
+              <span class="selection-count" id="selectedImageCount" hidden>0</span>
+            </button>
+          </div>
         </div>
         <div class="file-browser" id="fileBrowser">
           <div class="type-list" id="fileTypeList"></div>
@@ -102,14 +111,6 @@
             <h2>No stored files</h2>
             <p>Images and files from your sessions will appear here.</p>
           </div>
-        </div>
-        <div class="image-batch-actions" id="imageBatchActions" hidden>
-          <span id="selectedImageCount">0 selected</span>
-          <button id="selectAllImages" type="button">Select all</button>
-          <button class="batch-download" id="downloadSelectedImages" type="button" disabled>
-            <span class="download-icon" aria-hidden="true"></span>Download selected
-          </button>
-          <button id="clearImageSelection" type="button" disabled>Clear</button>
         </div>
         <footer class="storage-summary">
           <span id="storageSummary">0 items · 0 B stored in this browser</span>
@@ -195,6 +196,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=2026.08.15.4"></script>
+  <script type="module" src="app.js?v=2026.08.16.1"></script>
 </body>
 </html>

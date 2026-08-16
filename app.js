@@ -97,11 +97,10 @@ const ui = {
   fileTypeList: $('#fileTypeList'),
   storedFileList: $('#storedFileList'),
   libraryEmpty: $('#libraryEmpty'),
-  imageBatchActions: $('#imageBatchActions'),
+  imageSelectionTools: $('#imageSelectionTools'),
   selectedImageCount: $('#selectedImageCount'),
   selectAllImages: $('#selectAllImages'),
   downloadSelectedImages: $('#downloadSelectedImages'),
-  clearImageSelection: $('#clearImageSelection'),
   storageSummary: $('#storageSummary'),
   storedCount: $('#storedCount'),
   navButtons: [...document.querySelectorAll('.app-nav [data-view]')],
@@ -939,9 +938,12 @@ function renderFileRows(files) {
       toggle.className = 'selection-toggle';
       toggle.setAttribute('aria-label', `${selectedStoredImageIds.has(item.id) ? 'Unselect' : 'Select'} ${item.name || 'image'}`);
       toggle.setAttribute('aria-pressed', String(selectedStoredImageIds.has(item.id)));
-      toggle.appendChild(visual);
+      const checkbox = document.createElement('span');
+      checkbox.className = 'checkbox-icon';
+      checkbox.setAttribute('aria-hidden', 'true');
+      toggle.appendChild(checkbox);
       toggle.addEventListener('click', () => toggleStoredImageSelection(item.id));
-      row.appendChild(toggle);
+      row.append(toggle, visual);
     } else {
       row.appendChild(visual);
     }
@@ -986,19 +988,22 @@ function renderFileRows(files) {
   }
 }
 
-function updateImageBatchActions() {
+function updateImageSelectionTools() {
   const imageItems = storedFiles.filter(item => fileType(item) === 'Images');
   const validIds = new Set(imageItems.map(item => item.id));
   for (const id of selectedStoredImageIds)
     if (!validIds.has(id)) selectedStoredImageIds.delete(id);
   const visible = selectedFileType === 'Images' && !ui.fileSearch.value.trim();
-  ui.imageBatchActions.hidden = !visible;
+  ui.imageSelectionTools.hidden = !visible;
   if (!visible) return;
   const count = selectedStoredImageIds.size;
-  ui.selectedImageCount.textContent = `${count} selected`;
+  const allSelected = imageItems.length > 0 && count === imageItems.length;
+  ui.selectedImageCount.textContent = String(count);
+  ui.selectedImageCount.hidden = count === 0;
   ui.downloadSelectedImages.disabled = count === 0;
-  ui.clearImageSelection.disabled = count === 0;
-  ui.selectAllImages.textContent = imageItems.length > 0 && count === imageItems.length ? 'Unselect all' : 'Select all';
+  ui.selectAllImages.dataset.state = allSelected ? 'all' : count > 0 ? 'some' : 'none';
+  ui.selectAllImages.setAttribute('aria-pressed', String(allSelected));
+  ui.selectAllImages.setAttribute('aria-label', allSelected ? 'Unselect all images' : 'Select all images');
 }
 
 function renderFileBrowser() {
@@ -1006,7 +1011,7 @@ function renderFileBrowser() {
   ui.fileTypeList.hidden = true;
   ui.storedFileList.hidden = true;
   ui.libraryEmpty.hidden = true;
-  ui.imageBatchActions.hidden = true;
+  ui.imageSelectionTools.hidden = true;
   ui.backToTypes.hidden = !selectedFileType && !query;
 
   if (!storedFiles.length) {
@@ -1032,7 +1037,7 @@ function renderFileBrowser() {
     }
     renderFileRows(filtered);
     ui.storedFileList.hidden = false;
-    updateImageBatchActions();
+    updateImageSelectionTools();
     return;
   }
 
@@ -2590,10 +2595,6 @@ ui.selectAllImages.addEventListener('click', () => {
   const allSelected = images.length > 0 && images.every(item => selectedStoredImageIds.has(item.id));
   selectedStoredImageIds.clear();
   if (!allSelected) images.forEach(item => selectedStoredImageIds.add(item.id));
-  renderFileBrowser();
-});
-ui.clearImageSelection.addEventListener('click', () => {
-  selectedStoredImageIds.clear();
   renderFileBrowser();
 });
 ui.downloadSelectedImages.addEventListener('click', downloadSelectedImageFiles);
