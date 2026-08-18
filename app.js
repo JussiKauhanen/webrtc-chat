@@ -109,6 +109,8 @@ let peer = null;
 let chatChannel = null;
 let mediaChannel = null;
 let peerRole = null;
+let hasConnectedBefore = false;
+let reconnectRequired = false;
 let connectedAt = 0;
 let lastPongAt = 0;
 let lastRttMs = 0;
@@ -680,7 +682,7 @@ function setConnectionStatus(state, title, detail) {
     ? 'unavailable'
     : state === 'connected'
       ? 'connected'
-      : state === 'pairing' || state === 'stale'
+      : state === 'pairing'
         ? 'connecting'
         : 'offline';
   const label = unavailable
@@ -688,8 +690,8 @@ function setConnectionStatus(state, title, detail) {
     : visualState === 'connected'
       ? 'Connected'
       : visualState === 'connecting'
-        ? state === 'stale' ? 'Reconnecting' : 'Connecting'
-        : 'Reconnect';
+        ? 'Connecting'
+        : hasConnectedBefore ? 'Reconnect' : 'Connect';
   ui.connectionNav.dataset.state = visualState;
   ui.connectionNavLabel.textContent = label;
   ui.connectionNav.setAttribute('aria-label', `${label}. ${detail}`);
@@ -701,7 +703,7 @@ function channelIsOpen(channel) {
 }
 
 function isConnected() {
-  return channelIsOpen(chatChannel);
+  return channelIsOpen(chatChannel) && peer?.connectionState === 'connected' && !reconnectRequired;
 }
 
 function updateComposer() {
@@ -1300,7 +1302,7 @@ function sendHeartbeat() {
   try { sendChatPacket({ type: 'ping', id }); } catch {}
   const now = Date.now();
   if (lastPongAt && now - lastPongAt > HEARTBEAT_STALE_MS)
-    setConnectionStatus('stale', 'Connection quiet', 'Waiting for the other device to respond…');
+    markConnectionLost('Connection quiet');
   for (const [pendingId, started] of pendingPings)
     if (performance.now() - started > HEARTBEAT_STALE_MS * 2) pendingPings.delete(pendingId);
 }
@@ -1320,6 +1322,8 @@ function stopHeartbeat() {
 
 function setConnectedUi() {
   if (!connectedAt) connectedAt = Date.now();
+  hasConnectedBefore = true;
+  reconnectRequired = false;
   lastPongAt = Date.now();
   pairingActive = false;
   buildingSignal = false;
@@ -1345,16 +1349,22 @@ function setConnectedUi() {
   }
 }
 
+function markConnectionLost(title = 'Connection lost') {
+  reconnectRequired = true;
+  stopHeartbeat();
+  document.body.dataset.connected = 'false';
+  setConnectionStatus('stale', title, 'Press Reconnect to run the pairing procedure again.');
+  if (currentView === 'send') showAppView('recent');
+  updateComposer();
+}
+
 function updateConnectionFromPeer() {
   if (!peer) return;
   const state = peer.connectionState;
   if (state === 'connected') {
     if (channelIsOpen(chatChannel)) setConnectedUi();
     else {
-      stopHeartbeat();
-      setConnectionStatus('stale', 'Chat channel closed', 'Press Connect to pair the devices again.');
-      if (currentView === 'send') showAppView('recent');
-      updateComposer();
+      markConnectionLost('Chat channel closed');
     }
     return;
   }
@@ -1363,14 +1373,11 @@ function updateConnectionFromPeer() {
     return;
   }
   if (state === 'disconnected') {
-    setConnectionStatus('stale', 'Reconnecting', 'The peer route is temporarily unavailable.');
+    markConnectionLost();
     return;
   }
   if (state === 'failed') {
-    stopHeartbeat();
-    setConnectionStatus('failed', 'Connection failed', 'Press Connect to pair the devices again.');
-    if (currentView === 'send') showAppView('recent');
-    updateComposer();
+    markConnectionLost('Connection failed');
     return;
   }
   if (state === 'closed') {
@@ -1384,7 +1391,7 @@ function bindChatChannel(channel) {
   chatChannel = channel;
   chatChannel.onopen = () => setConnectedUi();
   chatChannel.onclose = updateConnectionFromPeer;
-  chatChannel.onerror = () => setConnectionStatus('stale', 'Channel error', 'Trying to keep the peer connection alive…');
+  chatChannel.onerror = () => markConnectionLost('Channel error');
   chatChannel.onmessage = event => {
     if (typeof event.data !== 'string') return;
     recordBytes('received', countStringBytes(event.data));
@@ -1401,7 +1408,8 @@ function bindChatChannel(channel) {
         pendingPings.delete(packet.id);
       }
       lastPongAt = Date.now();
-      setConnectionStatus('connected', 'Live connection', `Heartbeat active · ${Math.round(lastRttMs || 0)} ms round trip.`);
+      if (reconnectRequired && peer?.connectionState === 'connected') setConnectedUi();
+      else setConnectionStatus('connected', 'Live connection', `Heartbeat active · ${Math.round(lastRttMs || 0)} ms round trip.`);
       return;
     }
     if (packet?.type === 'message' && typeof packet.text === 'string') {
@@ -1451,6 +1459,7 @@ function teardownPeer({ keepMetrics = true } = {}) {
   chatChannel = null;
   mediaChannel = null;
   peerRole = null;
+  reconnectRequired = false;
   incomingImage = null;
   document.body.dataset.connected = 'false';
   liveSessionId = '';

@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NearChat Desktop POC — Split view</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #e9f2fb;
+      --surface: #fff;
+      --soft: #f3f5f7;
+      --ink: #14181f;
+      --text: #4d5661;
+      --muted: #8c949e;
+      --line: #e3e7eb;
+      --blue: #2e73eb;
+      --blue-soft: #e8f1ff;
+      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { min-width: 980px; min-height: 100vh; margin: 0; padding: 28px; display: grid; place-items: center; background: var(--page); color: var(--text); }
+    button, input { font: inherit; color: inherit; }
+    button { border: 0; cursor: pointer; }
+    .window { width: min(1440px, calc(100vw - 56px)); height: min(880px, calc(100vh - 56px)); min-height: 680px; display: grid; grid-template-columns: 218px minmax(500px, 1fr) 330px; overflow: hidden; border: 1px solid rgba(20,24,31,.1); border-radius: 22px; background: var(--surface); box-shadow: 0 30px 90px rgba(45,74,108,.18); }
+    .sidebar { padding: 22px 14px 18px; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: #f8fafc; }
+    .brand { padding: 0 10px 24px; display: flex; align-items: center; gap: 10px; color: var(--ink); font-size: 17px; font-weight: 750; }
+    .mark { width: 31px; height: 31px; position: relative; border: 2px solid var(--blue); border-radius: 9px; }
+    .mark::before { content: ""; width: 5px; height: 5px; position: absolute; left: 6px; top: 7px; border-radius: 50%; background: var(--blue); box-shadow: 10px 0 0 var(--blue); }
+    .mark::after { content: ""; width: 10px; height: 2px; position: absolute; left: 8px; bottom: 6px; border-radius: 3px; background: var(--blue); }
+    .nav { display: grid; gap: 5px; }
+    .nav button { min-height: 43px; padding: 0 12px; display: flex; align-items: center; gap: 11px; border-radius: 11px; background: transparent; text-align: left; font-size: 13px; font-weight: 650; }
+    .nav button:hover { background: #edf1f5; }
+    .nav button.active { background: var(--blue-soft); color: var(--blue); }
+    .nav-icon { width: 19px; height: 19px; position: relative; flex: none; color: currentColor; }
+    .nav-icon.recent { border: 1.8px solid currentColor; border-radius: 3px; }
+    .nav-icon.recent::after { content: ""; width: 8px; height: 1.8px; position: absolute; left: 4px; top: 8px; background: currentColor; box-shadow: 0 4px 0 currentColor; }
+    .nav-icon.send::before, .nav-icon.send::after { content: ""; position: absolute; left: 3px; top: 9px; width: 14px; height: 1.8px; border-radius: 2px; background: currentColor; }
+    .nav-icon.send::after { transform: rotate(90deg); }
+    .nav-icon.types { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
+    .nav-icon.types i { border: 1.7px solid currentColor; border-radius: 3px; }
+    .side-bottom { margin-top: auto; padding: 16px 10px 0; border-top: 1px solid var(--line); }
+    .side-bottom strong { display: block; color: var(--ink); font-size: 11px; }
+    .side-bottom span { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+    .meter { height: 5px; margin-top: 10px; overflow: hidden; border-radius: 8px; background: #dfe4e9; }
+    .meter i { width: 28%; height: 100%; display: block; background: var(--blue); }
+    .content { min-width: 0; display: grid; grid-template-rows: auto auto minmax(0,1fr); }
+    .head { padding: 25px 28px 16px; display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+    .head h1 { margin: 0; color: var(--ink); font-size: 34px; letter-spacing: -.04em; }
+    .head p { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+    .connect { min-height: 42px; padding: 0 18px; border-radius: 11px; background: var(--blue); color: #fff; font-size: 12px; font-weight: 700; box-shadow: 0 8px 18px rgba(46,115,235,.2); }
+    .toolbar { padding: 0 28px 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }
+    .search { width: min(430px, 60%); height: 42px; padding: 0 14px; border: 0; border-radius: 11px; outline: 0; background: var(--soft); }
+    .sort { margin-left: auto; padding: 8px 0; background: transparent; color: var(--muted); font-size: 11px; }
+    .list { min-height: 0; padding: 12px 28px 30px; overflow: auto; }
+    .day { margin: 14px 0 7px; color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
+    .item { width: 100%; min-height: 68px; padding: 9px 8px; display: grid; grid-template-columns: 48px minmax(0,1fr) auto; align-items: center; gap: 13px; border-radius: 12px; background: transparent; text-align: left; }
+    .item:hover, .item.selected { background: #f2f6fb; }
+    .item.selected { box-shadow: inset 3px 0 var(--blue); }
+    .thumb { width: 48px; height: 48px; border-radius: 10px; background: linear-gradient(145deg,#90b8ee,#365b95); }
+    .thumb.cat { position: relative; background: linear-gradient(145deg,#f0c19c,#ba7a54); }
+    .thumb.cat::before { content: ""; width: 22px; height: 20px; position: absolute; left: 13px; top: 15px; border-radius: 50% 50% 43% 43%; background: #fff3e5; box-shadow: -8px -9px 0 -5px #fff3e5, 8px -9px 0 -5px #fff3e5; }
+    .thumb.map { background: linear-gradient(30deg,#69a7c7 0 30%,#d9c98b 30% 43%,#8ebd79 43% 70%,#537da2 70%); }
+    .file { width: 42px; height: 48px; position: relative; display: grid; place-items: end center; padding-bottom: 8px; border-radius: 7px; background: #347fe0; color: #fff; font-size: 8px; font-style: normal; font-weight: 800; }
+    .file::after { content: ""; position: absolute; right: 0; top: 0; border-style: solid; border-width: 0 0 12px 12px; border-color: transparent transparent rgba(255,255,255,.42) transparent; }
+    .file.pdf { background: #ed5353; }
+    .file.zip { background: #858990; }
+    .item-copy { min-width: 0; }
+    .item-copy strong { display: block; overflow: hidden; color: var(--ink); font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+    .item-copy small { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
+    .dots { padding: 10px; color: #a5acb5; font-weight: 800; letter-spacing: 2px; }
+    .preview { min-width: 0; padding: 22px; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: #fbfcfd; }
+    .preview-label { color: var(--muted); font-size: 9px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .preview-box { aspect-ratio: 1.1; margin-top: 14px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--soft); }
+    .preview-art { width: 76%; aspect-ratio: 1; border-radius: 18px; background: linear-gradient(145deg,#f0c19c,#ba7a54); box-shadow: 0 18px 35px rgba(60,70,82,.16); }
+    .preview-art.map { background: linear-gradient(30deg,#69a7c7 0 30%,#d9c98b 30% 43%,#8ebd79 43% 70%,#537da2 70%); }
+    .preview-art.pdf { background: linear-gradient(145deg,#f27777,#c93c3c); }
+    .preview-art.zip { background: linear-gradient(145deg,#aeb3b8,#6d747b); }
+    .preview-art.message { background: linear-gradient(145deg,#7fb0ec,#3474c2); }
+    .preview h2 { margin: 20px 0 0; overflow: hidden; color: var(--ink); font-size: 18px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+    .preview-meta { margin-top: 7px; color: var(--muted); font-size: 11px; }
+    .facts { margin-top: 20px; padding: 12px 0; border-block: 1px solid var(--line); }
+    .fact { padding: 6px 0; display: flex; justify-content: space-between; gap: 15px; font-size: 10px; }
+    .fact span:first-child { color: var(--muted); }
+    .fact span:last-child { color: var(--ink); text-align: right; }
+    .preview-actions { margin-top: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .preview-actions button { min-height: 42px; border-radius: 10px; background: var(--blue); color: #fff; font-size: 11px; font-weight: 700; }
+    .preview-actions .secondary { border: 1px solid var(--line); background: #fff; color: var(--ink); }
+    .overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: rgba(43,57,72,.3); backdrop-filter: blur(8px); }
+    .overlay[hidden] { display: none; }
+    .dialog { width: 430px; padding: 28px; border-radius: 20px; background: #fff; box-shadow: 0 30px 90px rgba(30,45,60,.28); text-align: center; }
+    .devices { height: 112px; margin: 5px auto 22px; position: relative; }
+    .phone { width: 60px; height: 100px; position: absolute; top: 5px; border: 3px solid var(--blue); border-radius: 15px; background: var(--blue-soft); }
+    .phone:first-child { left: 102px; transform: rotate(-8deg); }
+    .phone:last-child { right: 102px; transform: rotate(8deg); }
+    .devices::after { content: ""; width: 54px; height: 2px; position: absolute; left: 50%; top: 55px; background: var(--blue); transform: translateX(-50%); box-shadow: 0 -7px 0 -1px var(--blue), 0 7px 0 -1px var(--blue); }
+    .dialog h2 { margin: 0; color: var(--ink); font-size: 22px; }
+    .dialog p { margin: 9px auto 20px; max-width: 330px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .dialog-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .dialog-actions button { min-height: 44px; border-radius: 10px; background: var(--blue); color: #fff; font-size: 11px; font-weight: 700; }
+    .dialog-actions .secondary { background: var(--soft); color: var(--text); }
+  </style>
+</head>
+<body>
+  <main class="window">
+    <aside class="sidebar">
+      <div class="brand"><span class="mark"></span>NearChat Direct</div>
+      <nav class="nav">
+        <button class="active"><span class="nav-icon recent"></span>Recents</button>
+        <button data-connect><span class="nav-icon send"></span>Send</button>
+        <button><span class="nav-icon types"><i></i><i></i><i></i><i></i></span>Types</button>
+      </nav>
+      <div class="side-bottom"><strong>1.4 GB stored here</strong><span>5 items in this browser</span><div class="meter"><i></i></div></div>
+    </aside>
+
+    <section class="content">
+      <header class="head"><div><h1>Recents</h1><p>Files and messages shared on this device</p></div><button class="connect" data-connect>Connect a device</button></header>
+      <div class="toolbar"><input class="search" id="search" type="search" placeholder="Search recent items"><button class="sort">Date modified ↓</button></div>
+      <div class="list" id="list">
+        <h2 class="day">Today</h2>
+        <button class="item selected" data-name="cat-window.webp" data-type="Image" data-size="1.8 MB" data-date="Today, 14:22" data-art="cat"><span class="thumb cat"></span><span class="item-copy"><strong>cat-window.webp</strong><small>Today · 1.8 MB · Received</small></span><span class="dots">•••</span></button>
+        <button class="item" data-name="trip-map.png" data-type="Image" data-size="4.2 MB" data-date="Today, 13:58" data-art="map"><span class="thumb map"></span><span class="item-copy"><strong>trip-map.png</strong><small>Today · 4.2 MB · Sent</small></span><span class="dots">•••</span></button>
+        <button class="item" data-name="Invoice-August.pdf" data-type="PDF" data-size="10 MB" data-date="Today, 11:06" data-art="pdf"><i class="file pdf">PDF</i><span class="item-copy"><strong>Invoice-August.pdf</strong><small>Today · 10 MB · Received</small></span><span class="dots">•••</span></button>
+        <h2 class="day">Yesterday</h2>
+        <button class="item" data-name="design-export.zip" data-type="Archive" data-size="86 MB" data-date="Yesterday, 18:40" data-art="zip"><i class="file zip">ZIP</i><span class="item-copy"><strong>design-export.zip</strong><small>Yesterday · 86 MB · Sent</small></span><span class="dots">•••</span></button>
+        <button class="item" data-name="Check this out — nearchat.local/demo" data-type="Message" data-size="Text" data-date="Yesterday, 17:12" data-art="message"><i class="file">TXT</i><span class="item-copy"><strong>Check this out — nearchat.local/demo</strong><small>Yesterday · Message · Received</small></span><span class="dots">•••</span></button>
+      </div>
+    </section>
+
+    <aside class="preview">
+      <span class="preview-label">Preview</span>
+      <div class="preview-box"><div class="preview-art" id="previewArt"></div></div>
+      <h2 id="previewName">cat-window.webp</h2><div class="preview-meta" id="previewMeta">Image · 1.8 MB</div>
+      <div class="facts"><div class="fact"><span>Modified</span><span id="previewDate">Today, 14:22</span></div><div class="fact"><span>Location</span><span>NearChat local storage</span></div><div class="fact"><span>Privacy</span><span>Only on this device</span></div></div>
+      <div class="preview-actions"><button>Save a copy</button><button class="secondary">Delete</button></div>
+    </aside>
+  </main>
+
+  <div class="overlay" id="connectDialog" hidden>
+    <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialogTitle"><div class="devices"><i class="phone"></i><i class="phone"></i></div><h2 id="dialogTitle">Connect a nearby device</h2><p>This is a visual POC. A real version would open the camera and start the QR handoff here.</p><div class="dialog-actions"><button id="demoConnect">Show connected state</button><button class="secondary" id="closeDialog">Cancel</button></div></section>
+  </div>
+
+  <script>
+    const dialog = document.querySelector('#connectDialog');
+    document.querySelectorAll('[data-connect]').forEach(button => button.addEventListener('click', () => dialog.hidden = false));
+    document.querySelector('#closeDialog').addEventListener('click', () => dialog.hidden = true);
+    document.querySelector('#demoConnect').addEventListener('click', () => { dialog.hidden = true; document.querySelector('.connect').textContent = 'Demo device connected'; });
+    document.querySelector('#search').addEventListener('input', event => document.querySelectorAll('.item').forEach(item => item.hidden = !item.dataset.name.toLowerCase().includes(event.target.value.toLowerCase())));
+    document.querySelectorAll('.item').forEach(item => item.addEventListener('click', () => {
+      document.querySelectorAll('.item').forEach(row => row.classList.remove('selected')); item.classList.add('selected');
+      document.querySelector('#previewName').textContent = item.dataset.name;
+      document.querySelector('#previewMeta').textContent = `${item.dataset.type} · ${item.dataset.size}`;
+      document.querySelector('#previewDate').textContent = item.dataset.date;
+      document.querySelector('#previewArt').className = `preview-art ${item.dataset.art}`;
+    }));
+  </script>
+</body>
+</html>
