@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#eaf4ff">
   <title>NearChat Direct</title>
-  <link rel="stylesheet" href="styles.css?v=2026.08.18.1">
+  <link rel="stylesheet" href="styles.css?v=2026.08.18.2">
 </head>
 <body data-connected="false">
   <main class="app" aria-label="NearChat Direct">
@@ -58,7 +58,7 @@
         <section class="message-stream" id="messageStream" aria-live="polite" aria-label="Chat messages">
           <div class="chat-empty" id="emptyState">
             <h2 id="emptyTitle">Ready to send</h2>
-            <p id="emptyCopy">Use the box below to send text or images.</p>
+            <p id="emptyCopy">Use the box below to send text or files.</p>
           </div>
         </section>
 
@@ -66,11 +66,13 @@
           <div class="image-draft" id="imageDraft" hidden>
             <img id="imageDraftPreview" alt="Selected image preview">
             <span><strong id="imageDraftName">Image ready</strong><small id="imageDraftSize"></small></span>
-            <button id="removeImage" type="button" aria-label="Remove selected image">×</button>
+            <button id="removeImage" type="button" aria-label="Remove selected files">×</button>
           </div>
           <div class="composer-row">
-            <button class="image-button" id="imageButton" type="button" aria-label="Choose images">Add</button>
-            <input id="imageInput" type="file" accept="image/*" multiple hidden>
+            <button class="image-button" id="imageButton" type="button" aria-label="Choose files">Add</button>
+            <input id="imageInput" type="file"
+                   accept="image/*,video/*,audio/*,.pdf,.txt,.rtf,.doc,.docx,.odt,.ppt,.pptx,.xls,.xlsx,.csv,.ods,.zip,.rar,.7z,.tar,.gz"
+                   multiple hidden>
             <input class="message-input" id="messageInput" type="text" maxlength="2000"
                    autocomplete="off" enterkeyhint="send" placeholder="Connect to start chatting"
                    aria-label="Message" disabled>
@@ -194,6 +196,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=2026.08.18.2"></script>
+  <script type="module" src="app.js?v=2026.08.18.3"></script>
 </body>
 </html>

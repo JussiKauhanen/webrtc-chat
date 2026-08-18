@@ -26,8 +26,8 @@ const HEARTBEAT_STALE_MS = 12000;
 const MEDIA_CHUNK_BYTES = 16 * 1024;
 const BUFFER_HIGH_WATER = 512 * 1024;
 const BUFFER_LOW_WATER = 128 * 1024;
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const MAX_PENDING_IMAGES = 20;
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_PENDING_FILES = 20;
 const MAX_SCAN_PIXELS = 420000;
 
 const ui = {
@@ -352,7 +352,7 @@ function setRecentEmpty() {
   ui.empty.hidden = hasMessages;
   ui.emptyTitle.textContent = connected ? 'Ready to send' : currentSession ? 'Nothing in this session' : 'No recent session';
   ui.emptyCopy.textContent = connected
-    ? 'Use the box below to send text or images to the other device.'
+    ? 'Use the box below to send text or files to the other device.'
     : currentSession
       ? 'Connect again to start a new local chat.'
       : 'Connect two devices to start a local chat.';
@@ -379,8 +379,16 @@ async function renderStoredSession(session) {
     if (item.kind === 'file' && item.blob instanceof Blob) {
       const url = URL.createObjectURL(item.blob);
       objectUrls.add(url);
-      appendImageMessage({ mine: item.mine, url, text: item.text || '', timestamp: item.createdAt,
-        state: item.mine ? 'sent' : 'received' });
+      appendImageMessage({
+        mine: item.mine,
+        url,
+        name: item.name,
+        mime: item.mime || item.blob.type || 'application/octet-stream',
+        size: item.size || item.blob.size,
+        text: item.text || '',
+        timestamp: item.createdAt,
+        state: item.mine ? 'sent' : 'received'
+      });
     }
   }
   setRecentEmpty();
@@ -744,6 +752,16 @@ function fileType(item) {
   if (/text|word|document|presentation|powerpoint/.test(mime) || /\.(txt|rtf|doc|docx|odt|ppt|pptx)$/.test(name))
     return 'Documents';
   return 'Other';
+}
+
+function isSupportedShareFile(name, mime) {
+  const cleanName = String(name || '').toLowerCase();
+  const cleanMime = String(mime || '').toLowerCase();
+  if (/^(image|video|audio)\//.test(cleanMime)) return true;
+  if (/\.(pdf|txt|rtf|doc|docx|odt|ppt|pptx|xls|xlsx|csv|ods|zip|rar|7z|tar|gz)$/.test(cleanName)) return true;
+  return cleanMime === 'application/pdf' || cleanMime === 'text/plain' || cleanMime === 'text/csv' ||
+    cleanMime === 'application/rtf' ||
+    /word|document|presentation|powerpoint|spreadsheet|excel|zip|rar|7z|tar|gzip/.test(cleanMime);
 }
 
 function fileDate(timestamp) {
@@ -1289,7 +1307,7 @@ function sendChatPacket(payload) {
 }
 
 function sendMediaPacket(payload) {
-  if (!channelIsOpen(mediaChannel)) throw new Error('The image channel is not ready.');
+  if (!channelIsOpen(mediaChannel)) throw new Error('The file channel is not ready.');
   const text = JSON.stringify(payload);
   mediaChannel.send(text);
   recordBytes('sent', countStringBytes(text));
@@ -1427,7 +1445,7 @@ function bindMediaChannel(channel) {
   mediaChannel.binaryType = 'arraybuffer';
   mediaChannel.onopen = updateComposer;
   mediaChannel.onclose = updateComposer;
-  mediaChannel.onerror = () => showToast('The image channel had a problem.');
+  mediaChannel.onerror = () => showToast('The file channel had a problem.');
   mediaChannel.onmessage = handleMediaPacket;
 }
 
@@ -2264,8 +2282,27 @@ function appendTextMessage({ mine, text, timestamp = Date.now(), state = 'receiv
   return { bubble, stateNode };
 }
 
-function appendImageMessage({ mine, url = '', text = '', timestamp = Date.now(), state = 'sending', progress = false }) {
+function createMessageFile({ name, mime, size, url }) {
+  const link = document.createElement('a');
+  link.className = 'message-file';
+  link.href = url;
+  link.download = safeDownloadName(name, mime);
+  link.rel = 'noopener';
+  const kind = fileType({ name, mime });
+  const copy = document.createElement('span');
+  const title = document.createElement('strong');
+  title.textContent = safeDownloadName(name, mime);
+  const detail = document.createElement('small');
+  detail.textContent = `${kind} · ${formatBytes(size)}`;
+  copy.append(title, detail);
+  link.append(createFileIcon(kind), copy);
+  return link;
+}
+
+function appendImageMessage({ mine, url = '', name = '', mime = 'image/jpeg', size = 0,
+    text = '', timestamp = Date.now(), state = 'sending', progress = false }) {
   const { bubble } = createMessageShell(mine);
+  const isImage = mime.startsWith('image/');
   let image = null;
   let progressFill = null;
   let progressLabel = null;
@@ -2273,7 +2310,9 @@ function appendImageMessage({ mine, url = '', text = '', timestamp = Date.now(),
     const progressBox = document.createElement('div');
     progressBox.className = 'message-progress';
     progressLabel = document.createElement('span');
-    progressLabel.textContent = mine ? 'Sending image…' : 'Receiving image…';
+    progressLabel.textContent = mine
+      ? `Sending ${isImage ? 'image' : safeDownloadName(name, mime)}…`
+      : `Receiving ${isImage ? 'image' : safeDownloadName(name, mime)}…`;
     const track = document.createElement('div');
     track.className = 'progress-track';
     progressFill = document.createElement('div');
@@ -2281,12 +2320,14 @@ function appendImageMessage({ mine, url = '', text = '', timestamp = Date.now(),
     track.appendChild(progressFill);
     progressBox.append(progressLabel, track);
     bubble.appendChild(progressBox);
-  } else if (url) {
+  } else if (url && isImage) {
     image = document.createElement('img');
     image.className = 'message-image';
     image.src = url;
     image.alt = mine ? 'Sent image' : 'Received image';
     bubble.appendChild(image);
+  } else if (url) {
+    bubble.appendChild(createMessageFile({ name, mime, size, url }));
   }
   if (text) {
     const copy = document.createElement('p');
@@ -2311,12 +2352,20 @@ function finishIncomingImage() {
   const blob = new Blob(completed.chunks, { type: completed.mime });
   const url = URL.createObjectURL(blob);
   objectUrls.add(url);
-  const image = document.createElement('img');
-  image.className = 'message-image';
-  image.src = url;
-  image.alt = 'Received image';
+  const isImage = completed.mime.startsWith('image/');
+  const attachment = isImage ? document.createElement('img') : createMessageFile({
+    name: completed.name,
+    mime: completed.mime,
+    size: blob.size,
+    url
+  });
+  if (isImage) {
+    attachment.className = 'message-image';
+    attachment.src = url;
+    attachment.alt = 'Received image';
+  }
   const progressBox = completed.view.progressFill?.parentElement?.parentElement;
-  progressBox?.replaceWith(image);
+  progressBox?.replaceWith(attachment);
   completed.view.stateNode.textContent = 'received';
   incomingImage = null;
   persistLiveItem({
@@ -2341,13 +2390,23 @@ function handleMediaPacket(event) {
   if (typeof event.data === 'string') {
     let packet;
     try { packet = JSON.parse(event.data); } catch { return; }
-    if (packet?.type !== 'image-meta' || typeof packet.id !== 'string' ||
+    const isImagePacket = packet?.type === 'image-meta';
+    const isFilePacket = packet?.type === 'file-meta';
+    const name = typeof packet?.name === 'string' ? packet.name.slice(0, 100) : '';
+    if ((!isImagePacket && !isFilePacket) || typeof packet.id !== 'string' ||
         typeof packet.mime !== 'string' || !Number.isFinite(packet.size) ||
-        packet.size < 1 || packet.size > MAX_IMAGE_BYTES) return;
+        packet.size < 1 || packet.size > MAX_FILE_BYTES ||
+        (isFilePacket && !isSupportedShareFile(name, packet.mime))) return;
     const timestamp = Number(packet.timestamp) || Date.now();
     const text = typeof packet.text === 'string' ? packet.text.slice(0, 2000) : '';
+    const mime = isImagePacket
+      ? (/^image\/(?:avif|webp|jpeg|png)$/.test(packet.mime) ? packet.mime : 'image/jpeg')
+      : (packet.mime.slice(0, 100) || 'application/octet-stream');
     const view = appendImageMessage({
       mine: false,
+      name,
+      mime,
+      size: packet.size,
       text,
       timestamp,
       state: `0 / ${formatBytes(packet.size)}`,
@@ -2355,8 +2414,8 @@ function handleMediaPacket(event) {
     });
     incomingImage = {
       id: packet.id,
-      name: typeof packet.name === 'string' ? packet.name.slice(0, 100) : 'Received image',
-      mime: /^image\/(?:avif|webp|jpeg|png)$/.test(packet.mime) ? packet.mime : 'image/jpeg',
+      name: name || (isImagePacket ? 'Received image' : 'Received file'),
+      mime,
       size: packet.size,
       text,
       timestamp,
@@ -2376,7 +2435,7 @@ function handleMediaPacket(event) {
 }
 
 function waitForMediaBuffer() {
-  if (!channelIsOpen(mediaChannel)) return Promise.reject(new Error('The image channel disconnected.'));
+  if (!channelIsOpen(mediaChannel)) return Promise.reject(new Error('The file channel disconnected.'));
   if (mediaChannel.bufferedAmount <= BUFFER_HIGH_WATER) return Promise.resolve();
   mediaChannel.bufferedAmountLowThreshold = BUFFER_LOW_WATER;
   return new Promise((resolve, reject) => {
@@ -2388,7 +2447,7 @@ function waitForMediaBuffer() {
     const timer = setTimeout(() => {
       finish();
       if (channelIsOpen(mediaChannel)) resolve();
-      else reject(new Error('The image channel disconnected.'));
+      else reject(new Error('The file channel disconnected.'));
     }, 5000);
     mediaChannel.addEventListener('bufferedamountlow', onLow, { once: true });
   });
@@ -2396,11 +2455,11 @@ function waitForMediaBuffer() {
 
 async function transferImage(image, text, view, id, timestamp) {
   sendMediaPacket({
-    type: 'image-meta',
+    type: image.blob.type.startsWith('image/') ? 'image-meta' : 'file-meta',
     id,
     timestamp,
     name: image.name,
-    mime: image.blob.type,
+    mime: image.blob.type || 'application/octet-stream',
     size: image.blob.size,
     text
   });
@@ -2408,7 +2467,7 @@ async function transferImage(image, text, view, id, timestamp) {
   for (let offset = 0; offset < image.blob.size; offset += MEDIA_CHUNK_BYTES) {
     await waitForMediaBuffer();
     const chunk = await image.blob.slice(offset, offset + MEDIA_CHUNK_BYTES).arrayBuffer();
-    if (!channelIsOpen(mediaChannel)) throw new Error('The image channel disconnected.');
+    if (!channelIsOpen(mediaChannel)) throw new Error('The file channel disconnected.');
     mediaChannel.send(chunk);
     recordBytes('sent', chunk.byteLength);
     sent += chunk.byteLength;
@@ -2462,15 +2521,23 @@ async function prepareImage(file) {
       context.drawImage(decodedImage.source, 0, 0, width, height);
       blob = await canvasBlob(canvas, 'image/webp', quality) || await canvasBlob(canvas, 'image/jpeg', quality);
       canvas.width = canvas.height = 1;
-      if (blob && blob.size <= MAX_IMAGE_BYTES) break;
+      if (blob && blob.size <= MAX_FILE_BYTES) break;
       quality = Math.max(.58, quality - .08);
       scale *= .82;
     }
-    if (!blob || blob.size > MAX_IMAGE_BYTES) throw new Error('The image could not be made small enough to send.');
+    if (!blob || blob.size > MAX_FILE_BYTES) throw new Error('The image could not be made small enough to send.');
     return { blob, width, height, name: file.name.slice(0, 100) };
   } finally {
     decodedImage.close();
   }
+}
+
+async function prepareShareFile(file) {
+  if (!(file instanceof File) || !isSupportedShareFile(file.name, file.type))
+    throw new Error('Choose an image, PDF, document, archive, audio, or video file.');
+  if (file.type.startsWith('image/')) return prepareImage(file);
+  if (file.size < 1 || file.size > MAX_FILE_BYTES) throw new Error('Choose a file no larger than 2 MB.');
+  return { blob: file, width: 0, height: 0, name: file.name.slice(0, 100) };
 }
 
 function clearPendingImages() {
@@ -2478,6 +2545,7 @@ function clearPendingImages() {
   pendingImages = [];
   ui.imageInput.value = '';
   ui.imageDraft.hidden = true;
+  ui.imageDraftPreview.hidden = false;
   ui.imageDraftPreview.removeAttribute('src');
   updateComposer();
 }
@@ -2485,40 +2553,46 @@ function clearPendingImages() {
 async function selectImages(files) {
   const requestedCount = files.length;
   const selected = Array.from(files)
-    .filter(file => file instanceof File && file.type.startsWith('image/'))
-    .slice(0, MAX_PENDING_IMAGES);
-  if (!selected.length) return;
+    .filter(file => file instanceof File && isSupportedShareFile(file.name, file.type))
+    .slice(0, MAX_PENDING_FILES);
+  if (!selected.length) {
+    showToast('Choose an image, PDF, document, archive, audio, or video file.');
+    return;
+  }
   imageBusy = true;
   ui.imageButton.disabled = true;
   clearPendingImages();
-  showToast(`Preparing ${selected.length === 1 ? 'image' : `${selected.length} images`}…`);
+  showToast(`Preparing ${selected.length === 1 ? 'file' : `${selected.length} files`}…`);
   let skipped = 0;
   try {
     for (const file of selected) {
       try {
-        const image = await prepareImage(file);
+        const image = await prepareShareFile(file);
         pendingImages.push({ image, url: URL.createObjectURL(image.blob) });
       } catch {
         skipped++;
       }
     }
-    if (!pendingImages.length) throw new Error('The selected images could not be prepared.');
+    if (!pendingImages.length) throw new Error('The selected files could not be prepared. Files must be no larger than 2 MB.');
     const first = pendingImages[0];
     const totalBytes = pendingImages.reduce((total, item) => total + item.image.blob.size, 0);
-    ui.imageDraftPreview.src = first.url;
+    const firstIsImage = first.image.blob.type.startsWith('image/');
+    ui.imageDraftPreview.hidden = !firstIsImage;
+    if (firstIsImage) ui.imageDraftPreview.src = first.url;
+    else ui.imageDraftPreview.removeAttribute('src');
     ui.imageDraftName.textContent = pendingImages.length === 1
-      ? first.image.name || 'Image ready'
-      : `${pendingImages.length} images ready`;
+      ? first.image.name || 'File ready'
+      : `${pendingImages.length} files ready`;
     ui.imageDraftSize.textContent = pendingImages.length === 1
-      ? `${first.image.width} × ${first.image.height} · ${formatBytes(totalBytes)}`
+      ? `${firstIsImage ? `${first.image.width} × ${first.image.height} · ` : ''}${formatBytes(totalBytes)}`
       : `${formatBytes(totalBytes)} total${skipped ? ` · ${skipped} skipped` : ''}`;
     ui.imageDraft.hidden = false;
-    if (selected.length === MAX_PENDING_IMAGES && requestedCount > MAX_PENDING_IMAGES)
-      showToast(`The first ${MAX_PENDING_IMAGES} images were selected.`);
-    else if (skipped) showToast(`${skipped} image${skipped === 1 ? '' : 's'} could not be prepared.`);
+    if (selected.length === MAX_PENDING_FILES && requestedCount > MAX_PENDING_FILES)
+      showToast(`The first ${MAX_PENDING_FILES} files were selected.`);
+    else if (skipped) showToast(`${skipped} file${skipped === 1 ? '' : 's'} could not be prepared.`);
   } catch (error) {
     clearPendingImages();
-    showToast(error.message || 'The images could not be prepared.');
+    showToast(error.message || 'The files could not be prepared.');
   } finally {
     imageBusy = false;
     updateComposer();
@@ -2560,16 +2634,16 @@ function insertPastedMessage(text) {
 async function handleClipboardPaste(event) {
   if (event.defaultPrevented || !isConnected() || !event.clipboardData) return;
   const files = clipboardFiles(event.clipboardData);
-  const images = files.filter(file => file.type.startsWith('image/'));
-  if (images.length) {
+  const supported = files.filter(file => isSupportedShareFile(file.name, file.type));
+  if (supported.length) {
     event.preventDefault();
     showAppView('send');
-    await selectImages(images);
+    await selectImages(supported);
     return;
   }
   if (files.length) {
     event.preventDefault();
-    showToast('Only image files can be pasted for now.');
+    showToast('That file type is not supported.');
     return;
   }
   const target = event.target;
@@ -2594,6 +2668,7 @@ async function submitMessage(event) {
   ui.input.value = '';
   pendingImages = [];
   ui.imageDraft.hidden = true;
+  ui.imageDraftPreview.hidden = false;
   ui.imageDraftPreview.removeAttribute('src');
   ui.imageInput.value = '';
   updateComposer();
@@ -2615,16 +2690,26 @@ async function submitMessage(event) {
 
   images.forEach(({ image, url }, index) => {
     objectUrls.add(url);
+    const mime = image.blob.type || 'application/octet-stream';
     const caption = index === 0 ? text : '';
     const id = randomId();
     const timestamp = Date.now() + index;
-    const view = appendImageMessage({ mine: true, url, text: caption, timestamp, state: 'queued' });
+    const view = appendImageMessage({
+      mine: true,
+      url,
+      name: image.name,
+      mime,
+      size: image.blob.size,
+      text: caption,
+      timestamp,
+      state: 'queued'
+    });
     persistLiveItem({
       id,
       kind: 'file',
       mine: true,
       name: image.name || 'Sent image',
-      mime: image.blob.type,
+      mime,
       size: image.blob.size,
       text: caption,
       blob: image.blob,
@@ -2634,7 +2719,7 @@ async function submitMessage(event) {
     outboundMediaQueue = task.catch(() => {});
     task.catch(error => {
       view.stateNode.textContent = 'failed';
-      showToast(error.message || 'An image could not be sent.');
+      showToast(error.message || 'A file could not be sent.');
     });
   });
 }

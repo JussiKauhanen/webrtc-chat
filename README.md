@@ -13,7 +13,7 @@ flowchart TD
     C --> D[Three beeps choose which device shares first]
     D --> E[The devices scan the offer and answer QR codes]
     E --> F[WebRTC opens a direct link]
-    F --> G[Send text and images]
+    F --> G[Send text and files]
     G --> H[Pings check that the link is still live]
 ```
 
@@ -25,6 +25,12 @@ flowchart TD
 - Each sent image is kept under 2 MB.
 - Location and camera details are removed.
 - Images are sent one at a time in the order selected.
+
+## Other files
+
+- PDFs, documents, archives, audio, and short videos are supported.
+- Each file must be no larger than 2 MB.
+- Files are sent one at a time and can be saved from the chat or local library.
 
 ## Files
 
