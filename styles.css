@@ -47,8 +47,6 @@ button:disabled { cursor: default; opacity: .45; }
   padding: max(12px, env(safe-area-inset-top)) 18px 12px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
   border-bottom: 1px solid var(--line);
   background: rgba(255, 255, 255, .96);
 }
@@ -85,31 +83,6 @@ button:disabled { cursor: default; opacity: .45; }
 }
 .brand-mark::before { width: 5px; height: 5px; left: 6px; top: 7px; }
 .brand-mark::after { width: 9px; height: 2px; right: 5px; bottom: 6px; }
-
-.connection-actions,
-.connection-state { display: flex; align-items: center; }
-.connection-actions { gap: 13px; }
-.connection-state { gap: 8px; }
-.connection-state strong { color: var(--text); font-size: 12px; font-weight: 700; }
-.connection-state small { display: none; }
-.status-dot {
-  width: 8px;
-  height: 8px;
-  flex: none;
-  border-radius: 50%;
-  background: #9aa6b2;
-}
-.status-dot[data-state="pairing"] { background: var(--yellow); }
-.status-dot[data-state="connected"] { background: var(--green); }
-.status-dot[data-state="stale"] { background: #df7b2b; }
-.status-dot[data-state="failed"] { background: var(--red); }
-.text-button {
-  padding: 7px 0;
-  background: transparent;
-  color: var(--red);
-  font-size: 12px;
-  font-weight: 700;
-}
 .metrics { display: none !important; }
 
 .app-views {
@@ -521,6 +494,53 @@ body[data-connected="false"] .composer { display: none; }
   stroke-width: 1.8;
 }
 .app-nav .nav-label { display: block; font-size: 10px; }
+.connection-nav-icon {
+  width: 23px;
+  height: 23px;
+  margin: 0 auto 4px;
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+.connection-qr,
+.connection-spinner,
+.connection-check { display: none; }
+.connection-qr { width: 19px; height: 19px; }
+.app-nav .connection-nav[data-state="offline"] { color: #d66634; }
+.connection-nav[data-state="offline"] .connection-qr { display: block; }
+.app-nav .connection-nav[data-state="connecting"] { color: var(--yellow); }
+.connection-nav[data-state="connecting"] .connection-spinner {
+  width: 21px;
+  height: 21px;
+  display: block;
+  border: 2px solid #dfe4e8;
+  border-top-color: currentColor;
+  border-right-color: currentColor;
+  border-radius: 50%;
+  animation: connection-spin 1s linear infinite;
+}
+.app-nav .connection-nav[data-state="connected"] { color: var(--green); }
+.connection-nav[data-state="connected"] .connection-check {
+  width: 21px;
+  height: 21px;
+  position: relative;
+  display: block;
+  border-radius: 50%;
+  background: currentColor;
+}
+.connection-nav[data-state="connected"] .connection-check::after {
+  content: "";
+  width: 5px;
+  height: 9px;
+  position: absolute;
+  left: 8px;
+  top: 4px;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+  transform: rotate(45deg);
+}
+.app-nav .connection-nav[data-state="unavailable"] { color: var(--red); }
+@keyframes connection-spin { to { transform: rotate(360deg); } }
 .app-nav .nav-count {
   position: absolute;
   left: calc(50% + 11px);
@@ -999,7 +1019,6 @@ body[data-connected="false"] .composer { display: none; }
   body { background: #ffffff; }
   .app { width: 100%; border: 0; box-shadow: none; }
   .topbar { padding-inline: 14px; }
-  .connection-state strong { max-width: 105px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty-state { padding: 24px 20px 40px; }
   .welcome-art { width: min(88%, 320px); }
   .message-bubble { max-width: 88%; }

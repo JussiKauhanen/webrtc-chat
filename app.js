@@ -31,10 +31,8 @@ const MAX_PENDING_IMAGES = 20;
 const MAX_SCAN_PIXELS = 420000;
 
 const ui = {
-  disconnect: $('#disconnectButton'),
-  statusDot: $('#statusDot'),
-  statusText: $('#statusText'),
-  statusDetail: $('#statusDetail'),
+  connectionNav: $('#connectionNav'),
+  connectionNavLabel: $('#connectionNavLabel'),
   metricRtt: $('#metricRtt'),
   metricSent: $('#metricSent'),
   metricReceived: $('#metricReceived'),
@@ -677,9 +675,25 @@ async function playHandoffBeeps(purpose) {
 }
 
 function setConnectionStatus(state, title, detail) {
-  ui.statusDot.dataset.state = state;
-  ui.statusText.textContent = title;
-  ui.statusDetail.textContent = detail;
+  const unavailable = state === 'failed' && title === 'WebRTC unavailable';
+  const visualState = unavailable
+    ? 'unavailable'
+    : state === 'connected'
+      ? 'connected'
+      : state === 'pairing' || state === 'stale'
+        ? 'connecting'
+        : 'offline';
+  const label = unavailable
+    ? 'Unavailable'
+    : visualState === 'connected'
+      ? 'Connected'
+      : visualState === 'connecting'
+        ? state === 'stale' ? 'Reconnecting' : 'Connecting'
+        : 'Reconnect';
+  ui.connectionNav.dataset.state = visualState;
+  ui.connectionNavLabel.textContent = label;
+  ui.connectionNav.setAttribute('aria-label', `${label}. ${detail}`);
+  ui.connectionNav.title = `${title}. ${detail}`;
 }
 
 function channelIsOpen(channel) {
@@ -1319,7 +1333,6 @@ function setConnectedUi() {
   showAppView('send');
   ensureLiveSession().catch(handleLibraryError);
   setConnectionStatus('connected', 'Live connection', 'Heartbeat active · messages send directly.');
-  ui.disconnect.hidden = false;
   navigator.vibrate?.([70, 50, 130]);
   startHeartbeat();
   startMetricTimers();
@@ -1444,7 +1457,6 @@ function teardownPeer({ keepMetrics = true } = {}) {
   liveSessionPromise = null;
   setRecentEmpty();
   updateRecentHeader();
-  ui.disconnect.hidden = true;
   if (currentView === 'send') showAppView('recent');
   if (!keepMetrics) resetMetrics();
   updateComposer();
@@ -2504,6 +2516,63 @@ async function selectImages(files) {
   }
 }
 
+function clipboardFiles(clipboardData) {
+  const files = [];
+  const seen = new Set();
+  const addFile = file => {
+    if (!(file instanceof File)) return;
+    const key = `${file.name}|${file.type}|${file.size}|${file.lastModified}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    files.push(file);
+  };
+  Array.from(clipboardData?.files || []).forEach(addFile);
+  for (const item of Array.from(clipboardData?.items || [])) {
+    if (item.kind !== 'file') continue;
+    addFile(item.getAsFile());
+  }
+  return files;
+}
+
+function insertPastedMessage(text) {
+  const cleanText = String(text || '').replace(/[\r\n]+/g, ' ');
+  if (!cleanText) return;
+  const start = ui.input.selectionStart ?? ui.input.value.length;
+  const end = ui.input.selectionEnd ?? start;
+  const limit = Number(ui.input.maxLength) || 2000;
+  const value = `${ui.input.value.slice(0, start)}${cleanText}${ui.input.value.slice(end)}`.slice(0, limit);
+  const caret = Math.min(start + cleanText.length, value.length);
+  ui.input.value = value;
+  ui.input.focus();
+  ui.input.setSelectionRange(caret, caret);
+  updateComposer();
+}
+
+async function handleClipboardPaste(event) {
+  if (event.defaultPrevented || !isConnected() || !event.clipboardData) return;
+  const files = clipboardFiles(event.clipboardData);
+  const images = files.filter(file => file.type.startsWith('image/'));
+  if (images.length) {
+    event.preventDefault();
+    showAppView('send');
+    await selectImages(images);
+    return;
+  }
+  if (files.length) {
+    event.preventDefault();
+    showToast('Only image files can be pasted for now.');
+    return;
+  }
+  const target = event.target;
+  const editable = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable;
+  if (editable) return;
+  const text = event.clipboardData.getData('text/plain');
+  if (!text) return;
+  event.preventDefault();
+  showAppView('send');
+  insertPastedMessage(text);
+}
+
 async function submitMessage(event) {
   event.preventDefault();
   if (!isConnected()) {
@@ -2565,7 +2634,13 @@ for (const button of ui.navButtons) {
   button.addEventListener('click', () => {
     const target = button.dataset.view;
     if (target === 'send' && !isConnected()) {
-      beginPairDance();
+      if (pairingActive) openPairing();
+      else beginPairDance();
+      return;
+    }
+    if (target === 'send' && currentView === 'send') {
+      openPairing();
+      setPairView('connected');
       return;
     }
     showAppView(target);
@@ -2599,7 +2674,6 @@ ui.selectAllImages.addEventListener('click', () => {
 });
 ui.downloadSelectedImages.addEventListener('click', downloadSelectedImageFiles);
 ui.clearLibrary.addEventListener('click', clearStoredLibrary);
-ui.disconnect.addEventListener('click', disconnectPeer);
 ui.disconnectInSheet.addEventListener('click', () => {
   closePairing();
   disconnectPeer();
@@ -2632,6 +2706,9 @@ ui.imageInput.addEventListener('change', () => {
   if (files?.length) selectImages(files);
 });
 ui.removeImage.addEventListener('click', clearPendingImages);
+document.addEventListener('paste', event => {
+  handleClipboardPaste(event).catch(error => showToast(error.message || 'Clipboard content could not be added.'));
+});
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && isConnected()) {
